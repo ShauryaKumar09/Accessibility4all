@@ -1,0 +1,12 @@
+# Accessibility4all — shared dependencies (one venv for the hub + all features)
+# Install with:  pip install -r requirements.txt
+groq==1.4.0
+numpy==2.4.6
+pillow==12.2.0
+PyAutoGUI==0.9.54
+pyobjc-core==12.2
+pyobjc-framework-Quartz==12.2
+pytesseract==0.3.13
+python-dotenv==1.2.2
+sounddevice==0.5.5
+SpeechRecognition==3.16.1
