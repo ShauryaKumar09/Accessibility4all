@@ -107,6 +107,8 @@ Rules:
 - If the command is a common browser/system action, use a hotkey. Use "click" ONLY when the user clearly refers to a specific visible label/button that has no keyboard shortcut.
 - To navigate to a website, return a hotkey to focus the address bar, OR a "type" action with the URL when the bar is already focused. Keep it to one action.
 - When clicking, pick the element from the numbered list whose text best matches the user's intent and return its NUMBER as "index". NEVER invent coordinates — only choose from the numbered elements you were given.
+- The elements are listed in reading order (roughly top-to-bottom, left-to-right). For ordinal/positional requests like "the first video", "the second link", "the top result", choose by that order among the relevant items. "The first video" usually means the first content title near the top of the list.
+- For "click on this/that <thing>", choose the element whose text names that thing (e.g. a video title, button label, or link text).
 - If NOTHING in the list matches the user's intent, do not guess a click. Prefer a hotkey, or return {{"action": "click", "index": -1}} to signal "no match".
 - Return ONLY the raw JSON object.
 """
@@ -281,11 +283,24 @@ _NON_PAYLOAD = {"", "bar", "box", "field", "page", "the web", "web", "online",
                 "the internet", "internet", "google", "it", "this", "that",
                 "something", "the search bar", "the address bar"}
 
+_TLD = r"(com|org|net|edu|gov|io|co|app|dev|ai|me|tv|uk|gg|xyz)"
+
 def _looks_like_url(s: str) -> bool:
     s = s.strip().lower()
     return (s.startswith(("http://", "https://", "www."))
-            or bool(re.search(r"\.(com|org|net|edu|gov|io|co|app|dev|ai|me|tv|uk)\b", s))
-            or bool(re.search(r"\bdot\s+(com|org|net|edu|io|co|ai)\b", s)))
+            or bool(re.search(r"\." + _TLD + r"\b", s))
+            or bool(re.search(r"\bdot\s+" + _TLD + r"\b", s)))
+
+def _normalize_url(s: str) -> str:
+    """Turn spoken URLs into real ones: 'youtube dot com slash feed' -> 'youtube.com/feed'."""
+    s = s.strip()
+    s = re.sub(r"\s+dot\s+", ".", s, flags=re.I)
+    s = re.sub(r"\s+slash\s+", "/", s, flags=re.I)
+    s = re.sub(r"\s+dash\s+", "-", s, flags=re.I)
+    # if it now looks like an address, drop any stray spaces inside it
+    if re.search(r"\." + _TLD + r"\b", s, re.I) or "/" in s:
+        s = re.sub(r"\s+", "", s)
+    return s
 
 def _strip_target(text: str) -> tuple[str, str | None]:
     """Split off a trailing 'in/into the <target>' phrase. Returns (payload, target)."""
@@ -306,12 +321,15 @@ def _match_typing(command: str) -> tuple[dict | None, str | None]:
             return (_seq(_k("command", "l"), _type(payload, enter=True)),
                     f"search the web for {payload!r}")
 
-    # 2) Navigate to a website:  "go to youtube.com" / "open example.com"
-    m = re.match(r"(?i)^\s*(?:go to|navigate to|visit|open up|open|head to)\s+(.+)$", cmd)
-    if m and _looks_like_url(m.group(1)):
-        url = m.group(1).strip()
-        return (_seq(_k("command", "l"), _type(url, enter=True)),
-                f"open website {url!r}")
+    # 2) Navigate to a website:  "go to youtube.com" / "open netflix.com"
+    #    ("go to X.com" just means: focus the address bar, type X.com, press Enter)
+    m = re.match(r"(?i)^\s*(?:go to|navigate to|visit|open up|open|head to|take me to|bring up)\s+(.+)$", cmd)
+    if m:
+        raw = m.group(1).strip()
+        norm = _normalize_url(raw)
+        if _looks_like_url(raw) or _looks_like_url(norm):
+            return (_seq(_k("command", "l"), _type(norm, enter=True)),
+                    f"open website {norm!r}")
 
     # 3) Type text:  "type X" / "enter X" / "paste X" [into the search/address bar]
     m = re.match(r"(?i)^\s*(?:type|enter|write|input|dictate|paste|put)\s+(.+)$", cmd)
@@ -356,6 +374,48 @@ def match_shortcut(command: str) -> tuple[dict | None, str | None]:
                 return _scroll(direction), f"scroll {direction}"
             return dict(action), desc                # copy so callers can't mutate the table
     return None, None
+
+
+# ── Stacking multiple commands in one utterance ───────────────────────────────
+# "open a new tab, go to youtube.com, and then click the first video" must run
+# as THREE separate commands, each re-checking the screen. We split on spoken
+# sequence words ("then", "and then") and on "and"/comma only when the next word
+# starts a new command (an action verb) — so "search for cats and dogs" stays one
+# command while "open a tab and go to youtube" becomes two.
+_VERB = (r"(?:open|go|navigate|visit|head|take|bring|click|tap|press|select|search|"
+         r"google|look|type|enter|write|input|paste|put|scroll|close|reopen|"
+         r"bookmark|reload|refresh|zoom|copy|cut|undo|redo|find|play|pause|mute|"
+         r"minimi[sz]e|quit|download|switch|hit)")
+
+def split_commands(command: str) -> list[str]:
+    text = command.strip()
+    # 1) strong sequence markers — always a boundary
+    parts = re.split(r"\s+(?:and\s+then|then|after\s+that|after\s+which|next)\s+",
+                     text, flags=re.I)
+    # 2) " and <verb>"  and  3) ", <verb>"  — boundary only before a new command
+    out: list[str] = []
+    for p in parts:
+        for piece in re.split(r"\s+and\s+(?=" + _VERB + r"\b)", p, flags=re.I):
+            out.extend(re.split(r"\s*,\s*(?=" + _VERB + r"\b)", piece, flags=re.I))
+    return [s.strip().rstrip(".,") for s in out if s.strip()]
+
+
+def _changes_page(action: dict) -> bool:
+    """True if an action likely loads/changes the page, so the next stacked
+    command should wait for it before screenshotting."""
+    k = action.get("action")
+    if k == "type":
+        return bool(action.get("enter"))
+    if k == "click":
+        return True
+    if k == "sequence":
+        return any(_changes_page(s) for s in action.get("steps", []))
+    if k == "hotkey":
+        keys = list(action.get("keys", []))
+        nav = (["command", "r"], ["command", "shift", "r"], ["command", "["],
+               ["command", "]"], ["command", "t"])
+        return keys in [list(x) for x in nav]
+    return False
 
 # ── Core pipeline functions ───────────────────────────────────────────────────
 def capture_screen_elements() -> list[dict]:
@@ -685,37 +745,39 @@ class App(tk.Tk):
             log("PIPELINE", "step 2 — focus Google Chrome")
             trial["chrome_activated"] = activate_chrome()
 
-            # ── Stage 3: try a Chrome keyboard shortcut first (fast path) ────
-            log("PIPELINE", "step 3 — match command to a Chrome shortcut")
-            action, shortcut_desc = match_shortcut(command)
-            if action is not None:
-                # Shortcut matched — no screenshot / OCR / Groq needed.
-                log("SHORTCUT", f"matched '{shortcut_desc}' -> {json.dumps(action)}")
-                trial["method"] = "shortcut"
-                trial["shortcut"] = shortcut_desc
-            else:
-                # No shortcut — fall back to screenshot + OCR + Groq (vision path).
-                log("SHORTCUT", "no shortcut matched — using screenshot + Groq", "WARN")
-                trial["method"] = "vision"
-                log("PIPELINE", "step 3a — capture screen + OCR")
-                elements = capture_screen_elements()
-                trial["element_count"] = len(elements)
-                log("PIPELINE", "step 3b — ask Groq for an action")
-                action = ask_groq(self.groq, command, elements)
-            trial["action"] = action
+            # ── Stage 3: split into stacked sub-commands and run each ─────────
+            commands = split_commands(command)
+            trial["commands"] = commands
+            log("PIPELINE", f"{len(commands)} sub-command(s): {commands}")
 
-            # ── Stage 4: perform the action ──────────────────────────────────
-            log("PIPELINE", "step 4 — execute action")
-            self._set_status(f"Executing: {json.dumps(action)}", "#69db7c")
-            with Timer("EXECUTE"):
-                result = execute_action(action)
-            trial["result"] = result
+            steps: list[dict] = []
+            for i, sub in enumerate(commands):
+                if i:
+                    # Let the previous step settle — longer if it loaded a page,
+                    # so a following "click" sees the new screen.
+                    wait = 2.5 if steps[-1]["changed_page"] else 0.7
+                    log("PIPELINE", f"waiting {wait:.1f}s for previous step to settle")
+                    time.sleep(wait)
+
+                label = f"Step {i + 1}/{len(commands)}" if len(commands) > 1 else "Working"
+                log("PIPELINE", f"--- {label}: {sub!r} ---")
+                self._set_status(f'{label}: "{sub}"', "#a0c4ff")
+                trial["_step"] = i + 1                  # for error reporting
+                res = self._run_subcommand(sub)
+                steps.append(res)
+                self._set_status(f"{label} ✓ {res['result']}", "#69db7c")
+
+            trial["steps"] = [{k: s[k] for k in ("command", "action", "result", "method")}
+                              for s in steps]
             trial["success"] = True
+            trial.pop("_step", None)
 
-            self._set_status(f"Done — {result}", "#69db7c")
+            summary = (steps[-1]["result"] if len(commands) == 1
+                       else f"{len(commands)} steps done")
+            self._set_status(f"Done — {summary}", "#69db7c")
             _log_trial(trial)
             self._set_trial_info(f"Trial logged — {TRIAL_LOG.name}")
-            log("PIPELINE", f"SUCCESS — {result}")
+            log("PIPELINE", f"SUCCESS — {summary}")
 
         except json.JSONDecodeError as e:
             log("GROQ", f"model returned non-JSON: {e}", "ERROR")
@@ -725,10 +787,12 @@ class App(tk.Tk):
             _log_trial(trial)
             self._set_trial_info("Trial logged — AI parse error")
         except Exception as e:
-            log("PIPELINE", f"unexpected error: {type(e).__name__}: {e}", "ERROR")
+            step = trial.get("_step")
+            where = f" (step {step})" if step else ""
+            log("PIPELINE", f"unexpected error{where}: {type(e).__name__}: {e}", "ERROR")
             trial["error"] = str(e)
             trial["success"] = False
-            self._set_status(f"Error: {e}", "#ff6b6b")
+            self._set_status(f"Error{where}: {e}", "#ff6b6b")
             _log_trial(trial)
             self._set_trial_info("Trial logged — error")
         finally:
@@ -737,6 +801,27 @@ class App(tk.Tk):
             log("PIPELINE", f"=== finished in {total:.2f}s ===")
             self._busy = False
             self.after(0, lambda: self.talk_btn.configure(state="normal", bg="#4361ee"))
+
+    def _run_subcommand(self, sub: str) -> dict:
+        """Resolve ONE command and run it. Tries the shortcut/typing fast-path
+        first; otherwise takes a FRESH screenshot and asks Groq what to do, so
+        stacked steps act on the current screen (e.g. click after navigating)."""
+        action, desc = match_shortcut(sub)
+        if action is not None:
+            log("RESOLVE", f"{sub!r} -> shortcut: {desc}")
+            method, ecount = "shortcut", None
+        else:
+            log("RESOLVE", f"{sub!r} -> no shortcut, using screenshot + Groq")
+            elements = capture_screen_elements()
+            ecount = len(elements)
+            action = ask_groq(self.groq, sub, elements)
+            method = "vision"
+        with Timer("EXECUTE"):
+            result = execute_action(action)
+        log("EXECUTE", f"result: {result}")
+        return {"command": sub, "action": action, "result": result,
+                "method": method, "element_count": ecount,
+                "changed_page": _changes_page(action)}
 
     def _start_watchdog(self, done: threading.Event, t0: float, warn_after: float = 20.0):
         """Print a terminal warning if the pipeline runs longer than warn_after.
