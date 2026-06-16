@@ -8,6 +8,7 @@ import re
 import sys
 import json
 import time
+import queue
 import subprocess
 import threading
 import datetime
@@ -613,6 +614,15 @@ def execute_action(action: dict) -> str:
         return f"Unknown action: {kind}"
 
 # ── UI ────────────────────────────────────────────────────────────────────────
+# Compact dark palette
+BG = "#1a1a2e"; CARD = "#262642"; TEXT = "#e8e8ff"; MUTED = "#8a8ab0"
+ACCENT = "#5b8cff"; REC = "#ff5a5f"; OK = "#4ade80"; WARN = "#ffb86b"
+IDLE_DOT = "#3a3a55"
+IDLE_MSG = "Ready"
+METER_W, METER_H = 268, 6
+TALK_KEYCODE = 50          # macOS keycode for the ` / ~ key (kVK_ANSI_Grave)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -623,63 +633,69 @@ class App(tk.Tk):
         self._recorder = PushToTalkRecorder()
         self._recording = False
         self._busy = False        # True while transcribing / acting on a command
+        self._reset_after = None  # pending "reset to idle" timer id
+        self._key_q: queue.Queue = queue.Queue()
+        self._grave_down = False
         self._build_ui()
+        self._reset_idle()
+        self._start_key_listener()
 
     def _build_ui(self):
         self.title("Accessibility4all")
         self.resizable(False, False)
-        self.configure(bg="#1a1a2e")
-
-        pad = {"padx": 30, "pady": 20}
-        title_font = tkfont.Font(family="Helvetica", size=22, weight="bold")
-        status_font = tkfont.Font(family="Helvetica", size=13)
-        btn_font = tkfont.Font(family="Helvetica", size=16, weight="bold")
-
-        tk.Label(self, text="Accessibility4all", font=title_font,
-                 fg="#e0e0ff", bg="#1a1a2e").pack(**pad)
-
-        self.status_var = tk.StringVar(value="Press the button and speak a command")
-        self.status_label = tk.Label(
-            self, textvariable=self.status_var, font=status_font,
-            fg="#a0c4ff", bg="#1a1a2e", wraplength=380, justify="center",
-        )
-        self.status_label.pack(padx=30, pady=(0, 10))
-
-        meter_frame = tk.Frame(self, bg="#0d0d1a", bd=0, highlightthickness=0)
-        meter_frame.pack(padx=30, pady=(0, 8), fill="x")
-        self._meter_canvas = tk.Canvas(
-            meter_frame, width=380, height=18, bg="#0d0d1a", highlightthickness=0
-        )
-        self._meter_canvas.pack()
-        self._meter_bar = self._meter_canvas.create_rectangle(
-            0, 0, 0, 18, fill="#4361ee", outline=""
-        )
-
-        self.talk_btn = tk.Button(
-            self, text="Hold to Talk", font=btn_font,
-            bg="#4361ee", fg="white",
-            activebackground="#3a0ca3", activeforeground="white",
-            relief="flat", padx=30, pady=18, cursor="hand2",
-        )
-        # True push-to-talk: record while held, process on release.
-        self.talk_btn.bind("<ButtonPress-1>", self._on_press)
-        self.talk_btn.bind("<ButtonRelease-1>", self._on_release)
-        self.talk_btn.pack(padx=30, pady=(6, 20))
-
-        self._trial_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self._trial_var, font=tkfont.Font(family="Helvetica", size=10),
-                 fg="#666688", bg="#1a1a2e").pack(padx=30, pady=(0, 12))
-
-        self.geometry("440x340")
-        self.lift()
+        self.configure(bg=BG)
         self.attributes("-topmost", True)
+
+        # header: app name + mic dot (also a click-and-hold fallback for talk)
+        header = tk.Frame(self, bg=BG)
+        header.pack(fill="x", padx=14, pady=(10, 2))
+        tk.Label(header, text="Accessibility4all",
+                 font=tkfont.Font(family="Helvetica", size=11, weight="bold"),
+                 fg=TEXT, bg=BG).pack(side="left")
+        self.mic_btn = tk.Label(header, text="●",
+                                font=tkfont.Font(family="Helvetica", size=15),
+                                fg="white", bg=IDLE_DOT, padx=7, cursor="hand2")
+        self.mic_btn.pack(side="right")
+        self.mic_btn.bind("<ButtonPress-1>", lambda e: self._start_recording())
+        self.mic_btn.bind("<ButtonRelease-1>", lambda e: self._stop_and_process())
+
+        # dynamic status line (the little "what it's doing" updates)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(
+            self, textvariable=self.status_var,
+            font=tkfont.Font(family="Helvetica", size=13),
+            fg=MUTED, bg=BG, wraplength=METER_W + 4, justify="left", anchor="w",
+        )
+        self.status_label.pack(fill="x", padx=16, pady=(6, 6))
+
+        # thin audio meter (shows it's hearing you)
+        self._meter_canvas = tk.Canvas(self, width=METER_W, height=METER_H,
+                                       bg=CARD, highlightthickness=0)
+        self._meter_canvas.pack(padx=16)
+        self._meter_bar = self._meter_canvas.create_rectangle(
+            0, 0, 0, METER_H, fill=ACCENT, outline="")
+
+        # trial info + persistent hint
+        self._trial_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self._trial_var,
+                 font=tkfont.Font(family="Helvetica", size=9),
+                 fg="#5a5a78", bg=BG, anchor="w").pack(fill="x", padx=16, pady=(4, 0))
+        tk.Label(self, text="hold   `   to talk",
+                 font=tkfont.Font(family="Helvetica", size=9),
+                 fg="#5a5a78", bg=BG, anchor="w").pack(fill="x", padx=16, pady=(0, 8))
+
+        w, h = 300, 152
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 80}")
+        self.lift()
 
     # ── meter (polled on the main thread; never updated from audio thread) ──
     def _draw_meter(self, energy: float):
         max_energy = 4000
-        width = min(int(energy / max_energy * 380), 380)
-        color = "#69db7c" if width > 200 else "#ffe066" if width > 60 else "#4361ee"
-        self._meter_canvas.coords(self._meter_bar, 0, 0, width, 18)
+        width = min(int(energy / max_energy * METER_W), METER_W)
+        color = (OK if width > METER_W * 0.55
+                 else "#ffd166" if width > METER_W * 0.15 else ACCENT)
+        self._meter_canvas.coords(self._meter_bar, 0, 0, width, METER_H)
         self._meter_canvas.itemconfig(self._meter_bar, fill=color)
 
     def _poll_meter(self):
@@ -689,7 +705,7 @@ class App(tk.Tk):
         self._draw_meter(self._recorder.level)
         self.after(30, self._poll_meter)
 
-    def _set_status(self, msg: str, color: str = "#a0c4ff"):
+    def _set_status(self, msg: str, color: str = ACCENT):
         # Marshal onto the main thread — safe to call from worker threads.
         self.after(0, lambda: (self.status_var.set(msg),
                                self.status_label.configure(fg=color)))
@@ -697,40 +713,131 @@ class App(tk.Tk):
     def _set_trial_info(self, msg: str):
         self.after(0, lambda: self._trial_var.set(msg))
 
-    # ── push-to-talk: record while held, transcribe + act on release ──
-    def _on_press(self, _event):
-        if self._busy:
-            log("UI", "button press ignored — still busy processing previous command",
-                "WARN")
+    def _set_indicator(self, state: str):
+        color = {"idle": IDLE_DOT, "rec": REC, "busy": ACCENT, "done": OK}.get(state, IDLE_DOT)
+        self.after(0, lambda: self.mic_btn.configure(bg=color))
+
+    # ── global ` (backtick) push-to-talk via a Quartz event tap ──
+    def _start_key_listener(self):
+        """Listen for the ` key system-wide so the user can talk while Chrome is
+        focused. We suppress the key so it never types a backtick. Requires
+        Accessibility permission; if denied, the mic dot still works as fallback."""
+        try:
+            import Quartz
+        except Exception as e:
+            log("HOTKEY", f"Quartz unavailable — ` key disabled, use mic dot: {e}", "WARN")
             return
-        log("UI", "button pressed — starting recording")
+
+        MODS = (Quartz.kCGEventFlagMaskShift | Quartz.kCGEventFlagMaskCommand
+                | Quartz.kCGEventFlagMaskControl | Quartz.kCGEventFlagMaskAlternate)
+
+        def cb(proxy, etype, event, refcon):
+            if etype in (Quartz.kCGEventTapDisabledByTimeout,
+                         Quartz.kCGEventTapDisabledByUserInput):
+                Quartz.CGEventTapEnable(self._tap, True)
+                return event
+            code = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+            if code == TALK_KEYCODE and not (Quartz.CGEventGetFlags(event) & MODS):
+                if etype == Quartz.kCGEventKeyDown:
+                    repeat = Quartz.CGEventGetIntegerValueField(
+                        event, Quartz.kCGKeyboardEventAutorepeat)
+                    if not repeat and not self._grave_down:
+                        self._grave_down = True
+                        self._key_q.put("down")
+                elif etype == Quartz.kCGEventKeyUp and self._grave_down:
+                    self._grave_down = False
+                    self._key_q.put("up")
+                return None        # suppress ` so it isn't typed anywhere
+            return event
+
+        def run():
+            mask = (Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
+                    | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp))
+            tap = Quartz.CGEventTapCreate(
+                Quartz.kCGSessionEventTap, Quartz.kCGHeadInsertEventTap,
+                Quartz.kCGEventTapOptionDefault, mask, cb, None)
+            if not tap:
+                log("HOTKEY", "no Accessibility permission — ` key off, use mic dot", "WARN")
+                self._key_q.put("noperm")
+                return
+            self._tap = tap
+            src = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+            Quartz.CFRunLoopAddSource(Quartz.CFRunLoopGetCurrent(), src,
+                                      Quartz.kCFRunLoopCommonModes)
+            Quartz.CGEventTapEnable(tap, True)
+            log("HOTKEY", "global ` (backtick) push-to-talk active")
+            Quartz.CFRunLoopRun()
+
+        threading.Thread(target=run, daemon=True).start()
+        self._poll_keys()
+
+    def _poll_keys(self):
+        try:
+            while True:
+                ev = self._key_q.get_nowait()
+                if ev == "down":
+                    self._start_recording()
+                elif ev == "up":
+                    self._stop_and_process()
+                elif ev == "noperm":
+                    self._set_status("Enable Accessibility for the ` key —\n"
+                                     "for now, hold the ● dot to talk", WARN)
+        except queue.Empty:
+            pass
+        self.after(20, self._poll_keys)
+
+    # ── push-to-talk: record while held (` key or mic dot), act on release ──
+    def _start_recording(self):
+        if self._busy or self._recording:
+            return
+        if self._reset_after:                       # cancel a pending idle reset
+            self.after_cancel(self._reset_after)
+            self._reset_after = None
+        log("UI", "talk started — recording")
         try:
             self._recorder.start()
         except Exception as e:
             log("RECORD", f"failed to open microphone: {e}", "ERROR")
-            self._set_status(f"Mic error: {e}", "#ff6b6b")
+            self._set_status(f"Mic error: {e}", REC)
             return
         self._recording = True
-        self.talk_btn.configure(text="Listening… (release to send)", bg="#e63946")
-        self._set_status("Listening — speak now, then release.", "#ffe066")
+        self._set_indicator("rec")
+        self._set_status("● Listening…", REC)
         self._poll_meter()
 
-    def _on_release(self, _event):
+    def _stop_and_process(self):
         if not self._recording:
             return
-        log("UI", "button released — stopping recording")
+        log("UI", "talk released — processing")
         self._recording = False
-        self.talk_btn.configure(text="Hold to Talk", bg="#6c757d")
         audio = self._recorder.stop()
         self._draw_meter(0)
         if audio is None:
-            self._set_status("Too short — hold the button while speaking.", "#ff6b6b")
-            self.talk_btn.configure(bg="#4361ee")
+            self._set_indicator("idle")
+            self._set_status("Too short — hold ` a moment longer", WARN)
+            self._schedule_reset()
             return
         self._busy = True
-        self._set_status("Processing…", "#a0c4ff")
+        self._set_indicator("busy")
+        self._set_status("Processing…", ACCENT)
         log("PIPELINE", "=== launching processing thread ===")
         threading.Thread(target=self._process, args=(audio,), daemon=True).start()
+
+    # ── reset back to idle once a command finishes ──
+    def _schedule_reset(self, delay_ms: int = 2500):
+        if self._reset_after:
+            self.after_cancel(self._reset_after)
+        self._reset_after = self.after(delay_ms, self._reset_idle)
+
+    def _reset_idle(self):
+        self._reset_after = None
+        if self._busy or self._recording:
+            return
+        self._set_indicator("idle")
+        self.status_var.set(IDLE_MSG)
+        self.status_label.configure(fg=MUTED)
+        self._trial_var.set("")
+        self._draw_meter(0)
 
     def _process(self, audio):
         trial: dict = {}
@@ -743,27 +850,29 @@ class App(tk.Tk):
         try:
             # ── Stage 1: speech-to-text ──────────────────────────────────────
             log("PIPELINE", "step 1/4 — transcribe audio")
+            self._set_status("Transcribing…", ACCENT)
             try:
                 with Timer("TRANSCRIBE"):
                     command = transcribe(audio)
             except sr.UnknownValueError:
                 log("TRANSCRIBE", "Google STT could not understand the audio", "WARN")
-                self._set_status("Could not understand speech. Try again.", "#ff6b6b")
+                self._set_status("Didn't catch that — try again", WARN)
                 _log_trial({"event": "unrecognized", "success": False})
-                self._set_trial_info("Trial logged — unrecognized speech")
+                self._schedule_reset()
                 return
             except sr.RequestError as e:
                 log("TRANSCRIBE", f"STT request error (network/timeout?): {e}", "ERROR")
-                self._set_status(f"Speech service error: {e}", "#ff6b6b")
+                self._set_status(f"Speech service error: {e}", REC)
                 _log_trial({"event": "stt_request_error", "error": str(e), "success": False})
-                self._set_trial_info("Trial logged — STT request error")
+                self._schedule_reset()
                 return
 
             trial["command"] = command
-            self._set_status(f'Heard: "{command}"\nProcessing…', "#a0c4ff")
+            self._set_status(f'Heard: "{command}"', ACCENT)
 
             # ── Stage 2: make sure Chrome is the active app ──────────────────
             log("PIPELINE", "step 2 — focus Google Chrome")
+            self._set_status("Focusing Chrome…", ACCENT)
             trial["chrome_activated"] = activate_chrome()
 
             # ── Stage 3: split into stacked sub-commands and run each ─────────
@@ -780,13 +889,11 @@ class App(tk.Tk):
                     log("PIPELINE", f"waiting {wait:.1f}s for previous step to settle")
                     time.sleep(wait)
 
-                label = f"Step {i + 1}/{len(commands)}" if len(commands) > 1 else "Working"
-                log("PIPELINE", f"--- {label}: {sub!r} ---")
-                self._set_status(f'{label}: "{sub}"', "#a0c4ff")
+                label = f"Step {i + 1}/{len(commands)} · " if len(commands) > 1 else ""
+                log("PIPELINE", f"--- {label}{sub!r} ---")
                 trial["_step"] = i + 1                  # for error reporting
-                res = self._run_subcommand(sub)
+                res = self._run_subcommand(sub, label)
                 steps.append(res)
-                self._set_status(f"{label} ✓ {res['result']}", "#69db7c")
 
             trial["steps"] = [{k: s[k] for k in ("command", "action", "result", "method")}
                               for s in steps]
@@ -795,51 +902,55 @@ class App(tk.Tk):
 
             summary = (steps[-1]["result"] if len(commands) == 1
                        else f"{len(commands)} steps done")
-            self._set_status(f"Done — {summary}", "#69db7c")
+            self._set_status(f"✓ {summary}", OK)
             _log_trial(trial)
-            self._set_trial_info(f"Trial logged — {TRIAL_LOG.name}")
+            self._set_trial_info(f"logged → {TRIAL_LOG.name}")
             log("PIPELINE", f"SUCCESS — {summary}")
 
         except json.JSONDecodeError as e:
             log("GROQ", f"model returned non-JSON: {e}", "ERROR")
             trial["error"] = f"JSONDecodeError: {e}"
             trial["success"] = False
-            self._set_status(f"Bad response from AI: {e}", "#ff6b6b")
+            self._set_status("AI gave a bad response — try again", WARN)
             _log_trial(trial)
-            self._set_trial_info("Trial logged — AI parse error")
         except Exception as e:
             step = trial.get("_step")
             where = f" (step {step})" if step else ""
             log("PIPELINE", f"unexpected error{where}: {type(e).__name__}: {e}", "ERROR")
             trial["error"] = str(e)
             trial["success"] = False
-            self._set_status(f"Error{where}: {e}", "#ff6b6b")
+            self._set_status(f"Couldn't do that{where} — {e}", REC)
             _log_trial(trial)
-            self._set_trial_info("Trial logged — error")
         finally:
             done.set()
             total = time.perf_counter() - pipeline_t0
             log("PIPELINE", f"=== finished in {total:.2f}s ===")
             self._busy = False
-            self.after(0, lambda: self.talk_btn.configure(state="normal", bg="#4361ee"))
+            self._set_indicator("done" if trial.get("success") else "idle")
+            self.after(0, self._schedule_reset)     # reset to idle shortly after
 
-    def _run_subcommand(self, sub: str) -> dict:
+    def _run_subcommand(self, sub: str, label: str = "") -> dict:
         """Resolve ONE command and run it. Tries the shortcut/typing fast-path
         first; otherwise takes a FRESH screenshot and asks Groq what to do, so
-        stacked steps act on the current screen (e.g. click after navigating)."""
+        stacked steps act on the current screen (e.g. click after navigating).
+        `label` prefixes the on-screen status (e.g. "Step 2/3 · ")."""
         action, desc = match_shortcut(sub)
         if action is not None:
             log("RESOLVE", f"{sub!r} -> shortcut: {desc}")
+            self._set_status(f"{label}{desc}", ACCENT)
             method, ecount = "shortcut", None
         else:
             log("RESOLVE", f"{sub!r} -> no shortcut, using screenshot + Groq")
+            self._set_status(f"{label}Looking at the screen…", ACCENT)
             elements = capture_screen_elements()
             ecount = len(elements)
+            self._set_status(f"{label}Asking AI…", ACCENT)
             action = ask_groq(self.groq, sub, elements)
             method = "vision"
         with Timer("EXECUTE"):
             result = execute_action(action)
         log("EXECUTE", f"result: {result}")
+        self._set_status(f"{label}✓ {result}", OK)
         return {"command": sub, "action": action, "result": result,
                 "method": method, "element_count": ecount,
                 "changed_page": _changes_page(action)}
