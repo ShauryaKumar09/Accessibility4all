@@ -261,6 +261,81 @@ CHROME_SHORTCUTS: list[tuple[str, dict, str]] = [
 ]
 _COMPILED_SHORTCUTS = [(re.compile(p), a, d) for p, a, d in CHROME_SHORTCUTS]
 
+
+# ── Typing / search / navigation intents ──────────────────────────────────────
+# These commands carry TEXT to enter, so they can't be a plain hotkey — they
+# focus a field (when needed), paste the text, and optionally press Enter. This
+# must run BEFORE the shortcut table, otherwise "type X into the search bar"
+# matches the address-bar shortcut and only focuses the bar without typing.
+def _type(text: str, enter: bool = False) -> dict:
+    return {"action": "type", "text": text, "enter": enter}
+
+def _seq(*steps) -> dict:
+    return {"action": "sequence", "steps": list(steps)}
+
+# trailing phrases that name WHERE to type (not the content itself)
+_TARGET = (r"(address bar|url bar|location bar|search bar|search box|search field"
+           r"|text box|text field|search|omnibox|box|field|page)")
+# payloads that refer to the field itself / are not real content to type
+_NON_PAYLOAD = {"", "bar", "box", "field", "page", "the web", "web", "online",
+                "the internet", "internet", "google", "it", "this", "that",
+                "something", "the search bar", "the address bar"}
+
+def _looks_like_url(s: str) -> bool:
+    s = s.strip().lower()
+    return (s.startswith(("http://", "https://", "www."))
+            or bool(re.search(r"\.(com|org|net|edu|gov|io|co|app|dev|ai|me|tv|uk)\b", s))
+            or bool(re.search(r"\bdot\s+(com|org|net|edu|io|co|ai)\b", s)))
+
+def _strip_target(text: str) -> tuple[str, str | None]:
+    """Split off a trailing 'in/into the <target>' phrase. Returns (payload, target)."""
+    m = re.search(r"\s+(?:in|into|on|to|inside)\s+(?:the\s+)?" + _TARGET + r"\s*$",
+                  text, re.I)
+    if m:
+        return text[:m.start()].rstrip(), m.group(1).lower()
+    return text, None
+
+def _match_typing(command: str) -> tuple[dict | None, str | None]:
+    cmd = command.strip()
+
+    # 1) Web search:  "search for X" / "search X" / "google X" / "look up X"
+    m = re.match(r"(?i)^\s*(?:search\s+for|search|google|look\s*up|bing)\s+(.+)$", cmd)
+    if m:
+        payload, _ = _strip_target(m.group(1))
+        if payload.strip().lower() not in _NON_PAYLOAD:
+            return (_seq(_k("command", "l"), _type(payload, enter=True)),
+                    f"search the web for {payload!r}")
+
+    # 2) Navigate to a website:  "go to youtube.com" / "open example.com"
+    m = re.match(r"(?i)^\s*(?:go to|navigate to|visit|open up|open|head to)\s+(.+)$", cmd)
+    if m and _looks_like_url(m.group(1)):
+        url = m.group(1).strip()
+        return (_seq(_k("command", "l"), _type(url, enter=True)),
+                f"open website {url!r}")
+
+    # 3) Type text:  "type X" / "enter X" / "paste X" [into the search/address bar]
+    m = re.match(r"(?i)^\s*(?:type|enter|write|input|dictate|paste|put)\s+(.+)$", cmd)
+    if m:
+        body = m.group(1)
+        enter = False
+        m2 = re.search(r"\s+(?:and|then)\s+(?:search|enter|submit|go|hit enter|press enter)\s*$",
+                       body, re.I)
+        if m2:
+            enter = True
+            body = body[:m2.start()].rstrip()
+        payload, target = _strip_target(body)
+        if payload.strip().lower() in _NON_PAYLOAD:
+            return None, None        # no actual content — let other paths handle it
+        # If they named the address/search bar, focus it (Cmd+L) before pasting;
+        # otherwise paste into whatever field already has focus.
+        if target and re.search(r"address|url|location|omnibox|search", target):
+            return (_seq(_k("command", "l"), _type(payload, enter=enter)),
+                    f"type {payload!r} in the address bar")
+        return _type(payload, enter=enter), f"type {payload!r}"
+
+    return None, None
+
+
 def match_shortcut(command: str) -> tuple[dict | None, str | None]:
     """Map a spoken command to a Chrome keyboard shortcut, if one applies.
 
@@ -268,6 +343,11 @@ def match_shortcut(command: str) -> tuple[dict | None, str | None]:
     needs visual context — in which case the caller falls back to screenshot +
     Groq. This is the fast path: no screenshot, no OCR, no model call.
     """
+    # Typing/search/navigation intents carry text — handle them first.
+    typed, typed_desc = _match_typing(command)
+    if typed is not None:
+        return typed, typed_desc
+
     text = command.lower().strip()
     for pattern, action, desc in _COMPILED_SHORTCUTS:
         if pattern.search(text):
@@ -385,9 +465,40 @@ def _resolve_click_index(action: dict, shown: list[dict]) -> dict:
     return action
 
 
+def _paste_text(text: str):
+    """Enter text by putting it on the clipboard and pasting it (Cmd+V).
+
+    On macOS simulated keystrokes (pyautogui.typewrite) are unreliable — they
+    often drop characters or type nothing — while Cmd+V is rock solid. We save
+    and restore the user's existing clipboard so we don't clobber it.
+    """
+    saved = None
+    try:
+        saved = subprocess.run(["pbpaste"], capture_output=True, timeout=2).stdout
+    except Exception:
+        pass
+    subprocess.run(["pbcopy"], input=text.encode("utf-8"), timeout=2)
+    time.sleep(0.05)
+    pyautogui.hotkey("command", "v")
+    time.sleep(0.15)                      # let the paste land before restoring
+    if saved is not None:
+        try:
+            subprocess.run(["pbcopy"], input=saved, timeout=2)
+        except Exception:
+            pass
+
+
 def execute_action(action: dict) -> str:
     kind = action.get("action")
     log("EXECUTE", f"performing action: {json.dumps(action)}")
+    if kind == "sequence":
+        # Run sub-actions in order (e.g. focus address bar -> paste -> Enter).
+        results = []
+        for i, step in enumerate(action.get("steps", [])):
+            if i:
+                time.sleep(0.25)          # let focus settle between steps
+            results.append(execute_action(step))
+        return " → ".join(results)
     if kind == "click":
         x, y = int(action["x"]), int(action["y"])
         pyautogui.moveTo(x, y, duration=0.3)
@@ -411,8 +522,12 @@ def execute_action(action: dict) -> str:
         return f"Hotkey: {'+'.join(keys)}"
     elif kind == "type":
         text = action.get("text", "")
-        pyautogui.typewrite(text, interval=0.05)
-        return f'Typed: "{text}"'
+        _paste_text(text)
+        if action.get("enter"):
+            time.sleep(0.15)
+            pyautogui.press("enter")
+            return f'Typed "{text}" + Enter'
+        return f'Typed "{text}"'
     else:
         return f"Unknown action: {kind}"
 
