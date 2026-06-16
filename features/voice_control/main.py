@@ -436,22 +436,43 @@ def capture_screen_elements() -> list[dict]:
         data = pytesseract.image_to_data(
             screenshot, output_type=pytesseract.Output.DICT
         )
-    elements = []
+    # pytesseract returns WORD-level boxes, so a title like "How to cook pasta"
+    # arrives as 4 separate words. We group words back into LINES (same block /
+    # paragraph / line) so each element is a whole label/title — otherwise the
+    # model can't match "the second video" against scattered single words.
+    groups: dict[tuple, dict] = {}
     for i in range(len(data["text"])):
         text = data["text"][i].strip()
         if not text or int(data["conf"][i]) < 40:
             continue
-        cx = data["left"][i] + data["width"][i] // 2
-        cy = data["top"][i] + data["height"][i] // 2
-        x = int(cx * scale_x)        # convert to logical (click) coordinates
-        y = int(cy * scale_y)
-        elements.append({"text": text, "x": x, "y": y})
-    log("OCR", f"found {len(elements)} usable text elements "
-               f"(coords scaled to logical screen space)")
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        left, top = data["left"][i], data["top"][i]
+        right, bottom = left + data["width"][i], top + data["height"][i]
+        g = groups.get(key)
+        if g is None:
+            groups[key] = {"words": [text], "x0": left, "y0": top,
+                           "x1": right, "y1": bottom}
+        else:
+            g["words"].append(text)
+            g["x0"], g["y0"] = min(g["x0"], left), min(g["y0"], top)
+            g["x1"], g["y1"] = max(g["x1"], right), max(g["y1"], bottom)
+
+    elements = []
+    for g in groups.values():       # dict preserves OCR (top-to-bottom) order
+        text = " ".join(g["words"]).strip()
+        if not text:
+            continue
+        cx = (g["x0"] + g["x1"]) / 2     # click the CENTER of the whole line
+        cy = (g["y0"] + g["y1"]) / 2
+        elements.append({"text": text,
+                         "x": int(cx * scale_x), "y": int(cy * scale_y)})
+    sample = " | ".join(e["text"][:30] for e in elements[:10])
+    log("OCR", f"found {len(elements)} line elements (grouped from words). "
+               f"sample: {sample}")
     return elements
 
 
-MAX_ELEMENTS = 80           # how many OCR elements we show the model
+MAX_ELEMENTS = 120          # how many OCR line-elements we show the model
 
 def ask_groq(client: Groq, command: str, elements: list[dict]) -> dict:
     shown = elements[:MAX_ELEMENTS]
