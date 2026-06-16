@@ -466,8 +466,12 @@ def capture_screen_elements() -> list[dict]:
             continue
         cx = (g["x0"] + g["x1"]) / 2     # click the CENTER of the whole line
         cy = (g["y0"] + g["y1"]) / 2
-        elements.append({"text": text,
-                         "x": int(cx * scale_x), "y": int(cy * scale_y)})
+        elements.append({
+            "text": text,
+            "x": int(cx * scale_x), "y": int(cy * scale_y),   # center (logical)
+            "x0": int(g["x0"] * scale_x), "y0": int(g["y0"] * scale_y),  # bbox
+            "x1": int(g["x1"] * scale_x), "y1": int(g["y1"] * scale_y),
+        })
     sample = " | ".join(e["text"][:30] for e in elements[:10])
     log("OCR", f"found {len(elements)} line elements (grouped from words). "
                f"sample: {sample}")
@@ -593,40 +597,96 @@ def _extract_click_target(command: str) -> str | None:
                   "", rest)
     return rest.strip(" '\"") or None
 
-def match_click_target(command: str, elements: list[dict]) -> dict | None:
-    """Return a click action on the element whose text best matches the spoken
-    title, or None if this isn't a title-click or nothing matches confidently."""
-    target = _extract_click_target(command)
-    if not target:
-        return None
-    words = [w for w in _norm_text(target).split()
-             if w not in _STOP_MATCH and w not in _ORDINALS
-             and not re.fullmatch(r"\d+(st|nd|rd|th)?", w)]
-    if not words:
-        return None        # pure ordinal / no real title — let Groq decide
-    target_clean = " ".join(words)
+def _thumbnail_point(title: dict, elements: list[dict], screen_h: int) -> tuple[int, int]:
+    """Pick a click point on the THUMBNAIL above a video's title line.
 
-    best, best_score = None, 0.0
+    A video's title is a link to the video, but it sits right above the channel
+    name — clicking low can hit the channel and open the wrong page. The
+    thumbnail (directly above the title) always opens the video, so we aim there.
+    We estimate the thumbnail's height from the gap up to the nearest text above
+    the title's column; if there's no clear gap we fall back to a fixed offset.
+    """
+    tx0, tx1, top = title["x0"], title["x1"], title["y0"]
+    cx = (tx0 + tx1) // 2
+    above_bottom = None
     for e in elements:
-        et = _norm_text(e["text"])
-        if not et:
+        if e is title or e["y1"] > top:                 # only elements above
             continue
-        if target_clean and target_clean in et:
-            score = 1.0                                  # exact phrase contained
-        else:
-            ew = et.split()
-            matched = sum(1 for w in words if _word_in(w, ew))
-            score = matched / len(words)                 # fraction of words found
-        if score > best_score:                           # ties keep the topmost
-            best_score, best = score, e
+        if e["x1"] >= tx0 - 20 and e["x0"] <= tx1 + 20:  # same column
+            above_bottom = max(above_bottom or 0, e["y1"])
+    if above_bottom is not None and (top - above_bottom) > 40:
+        # thumbnail roughly spans [above_bottom, top]; aim at its lower-middle
+        ty = int(above_bottom + (top - above_bottom) * 0.55)
+    else:
+        ty = int(top - max(60, 0.08 * screen_h))        # fixed fallback offset
+    return cx, max(ty, 1)
 
-    if best is not None and best_score >= 0.6:
-        log("MATCH", f"title match {best_score:.2f}: {best['text'][:55]!r} "
-                     f"at ({best['x']}, {best['y']})")
-        return {"action": "click", "x": best["x"], "y": best["y"]}
-    log("MATCH", f"no confident title match for {target!r} "
-                 f"(best {best_score:.2f}) — falling back to Groq", "WARN")
-    return None
+
+def _first_video_title(elements: list[dict], screen_w: int, screen_h: int) -> dict | None:
+    """Heuristic for a generic 'click a video': the topmost content-area line
+    that looks like a video title (longish, multi-word, not sidebar/top bar)."""
+    cands = [e for e in elements
+             if len(e["text"]) >= 15 and len(e["text"].split()) >= 3
+             and e["y"] > 0.08 * screen_h and e["x"] > 0.12 * screen_w]
+    cands.sort(key=lambda e: (e["y"], e["x"]))
+    return cands[0] if cands else None
+
+
+def match_click_target(command: str, elements: list[dict]) -> dict | None:
+    """Return a click action for a 'click on …' command, or None to defer to Groq.
+
+    For video clicks we aim at the thumbnail (above the title) so it always opens
+    the video, never the channel name. For other targets (buttons/links) we click
+    the matched text itself."""
+    is_video = bool(re.search(r"\b(video|thumbnail|clip|movie)\b", command, re.I)) \
+        or bool(re.match(r"(?i)\s*play\b", command))
+    screen_w, screen_h = pyautogui.size()
+
+    target = _extract_click_target(command)
+    words = []
+    if target:
+        words = [w for w in _norm_text(target).split()
+                 if w not in _STOP_MATCH and w not in _ORDINALS
+                 and not re.fullmatch(r"\d+(st|nd|rd|th)?", w)]
+
+    if words:
+        target_clean = " ".join(words)
+        best, best_score = None, 0.0
+        for e in elements:
+            et = _norm_text(e["text"])
+            if not et:
+                continue
+            if target_clean in et:
+                score = 1.0                              # exact phrase contained
+            else:
+                matched = sum(1 for w in words if _word_in(w, et.split()))
+                score = matched / len(words)             # fraction of words found
+            if score > best_score:                       # ties keep the topmost
+                best_score, best = score, e
+        if best is not None and best_score >= 0.6:
+            if is_video:
+                x, y = _thumbnail_point(best, elements, screen_h)
+                log("MATCH", f"title match {best_score:.2f}: {best['text'][:50]!r} "
+                             f"-> clicking thumbnail at ({x}, {y})")
+            else:
+                x, y = best["x"], best["y"]
+                log("MATCH", f"text match {best_score:.2f}: {best['text'][:50]!r} "
+                             f"at ({x}, {y})")
+            return {"action": "click", "x": x, "y": y}
+        log("MATCH", f"no confident match for {target!r} (best {best_score:.2f})"
+                     f" — falling back to Groq", "WARN")
+        return None
+
+    # No title given. If they said "click a video"/"play a video", pick the first
+    # plausible video and click its thumbnail.
+    if is_video:
+        cand = _first_video_title(elements, screen_w, screen_h)
+        if cand is not None:
+            x, y = _thumbnail_point(cand, elements, screen_h)
+            log("MATCH", f"generic video -> first title {cand['text'][:50]!r} "
+                         f"-> clicking thumbnail at ({x}, {y})")
+            return {"action": "click", "x": x, "y": y}
+    return None        # let Groq handle anything else
 
 
 def _paste_text(text: str):
