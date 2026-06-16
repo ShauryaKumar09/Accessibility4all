@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+
+# generated / machine-local
+trials.jsonl
+hub_state.json
+.venv/

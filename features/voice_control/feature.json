@@ -1,0 +1,7 @@
+{
+  "name": "Voice Control",
+  "description": "Hold-to-talk voice commands that control Google Chrome. Tries Chrome keyboard shortcuts first, falls back to screen OCR + AI for visual commands.",
+  "entry": "main.py",
+  "version": "0.1.0",
+  "author": "Accessibility4all"
+}

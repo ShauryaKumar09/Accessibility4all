@@ -1,0 +1,7 @@
+{
+  "name": "Example Feature",
+  "description": "A copy-me starter showing the contract every feature must follow. The hub ignores any folder whose name starts with '_', so this template never appears as a real toggle.",
+  "entry": "main.py",
+  "version": "0.1.0",
+  "author": "your name here"
+}
