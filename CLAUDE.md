@@ -107,17 +107,34 @@ Hold-to-talk voice commands that control Google Chrome.
 1. **Record** — push-to-talk via `sounddevice` (hold the button, release to send).
 2. **Transcribe** — Google STT through `SpeechRecognition` (15s timeout).
 3. **Focus Chrome** — `osascript` brings Chrome to the foreground.
-4. **Shortcut fast-path** — `match_shortcut()` maps the spoken command to a Chrome
-   keyboard shortcut via regex (`CHROME_SHORTCUTS`). On a match it fires the
-   hotkey directly — **no screenshot, no OCR, no AI call.** Covers new/close/
-   reopen tab, navigation, reload, find, zoom, scroll, bookmarks, history, etc.
-5. **Vision fallback** — only if no shortcut matches: screenshot → `pytesseract`
-   OCR → send the **numbered** element list to Groq → it returns the **index** of
-   the element to click → we look up the real coordinate.
-6. **Execute** — `pyautogui` performs the hotkey / click / scroll / type.
+4. **Split into sub-commands** — `split_commands()` breaks one utterance into
+   stacked steps on "then" / "and then" / "and &lt;verb&gt;" / ", &lt;verb&gt;", so
+   *"open a new tab, go to youtube.com, and then click the first video"* runs as
+   three commands. "search for cats and dogs" stays one command.
+5. **Per sub-command, resolve + execute** (`_run_subcommand`):
+   - **Typing / search / navigation** (`_match_typing`): "type X into the search
+     bar", "search for X", "go to youtube.com" → focus the field, **paste** the
+     text (Cmd+V, reliable on macOS), optionally press Enter. Spoken URLs like
+     "youtube dot com" are normalised to "youtube.com".
+   - **Shortcut fast-path** (`match_shortcut` / `CHROME_SHORTCUTS`): new/close/
+     reopen tab, reload, find, zoom, scroll, bookmarks, etc. → fire the hotkey,
+     no screenshot/AI.
+   - **Vision fallback**: anything else (e.g. "click the first video") →
+     screenshot → `pytesseract` OCR → send the **numbered** element list to Groq
+     → it returns the element **index** → we look up the verified coordinate.
+   Each vision step takes a **fresh** screenshot, and the loop **waits** after a
+   page-changing step (`_changes_page`) so later clicks see the new screen.
+6. **Execute** — `pyautogui` performs the hotkey / click / scroll / type, or a
+   `sequence` of those.
 
 Every run logs each step to the terminal with timings, and appends a JSON line to
-`features/voice_control/trials.jsonl` (`method` = `"shortcut"` or `"vision"`).
+`features/voice_control/trials.jsonl` (`commands`, per-step `method` =
+`"shortcut"`/`"vision"`).
+
+> **Why OCR text instead of sending the raw image to a vision model?** OCR gives
+> the *exact* pixel box of each on-screen word, so clicks land precisely. Vision
+> LLMs are unreliable at predicting precise click coordinates. The screenshot is
+> still "sent to Groq" — just as a numbered element list rather than pixels.
 
 ### Two things that are easy to get wrong (don't regress these)
 
