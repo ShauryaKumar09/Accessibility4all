@@ -119,7 +119,11 @@ Hold-to-talk voice commands that control Google Chrome.
    - **Shortcut fast-path** (`match_shortcut` / `CHROME_SHORTCUTS`): new/close/
      reopen tab, reload, find, zoom, scroll, bookmarks, etc. → fire the hotkey,
      no screenshot/AI.
-   - **Vision fallback**: anything else (e.g. "click the first video") →
+   - **Click by title** (`match_click_target`): for "click on the video titled X"
+     / "click on X", the spoken title is fuzzy-matched directly against the
+     on-screen OCR text (deterministic) and that element is clicked. This is more
+     reliable than asking the model to count items ("third video").
+   - **Vision fallback**: anything else / no confident title match →
      screenshot → `pytesseract` OCR → send the **numbered** element list to Groq
      → it returns the element **index** → we look up the verified coordinate.
    Each vision step takes a **fresh** screenshot, and the loop **waits** after a

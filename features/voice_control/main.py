@@ -9,6 +9,7 @@ import sys
 import json
 import time
 import queue
+import difflib
 import subprocess
 import threading
 import datetime
@@ -547,6 +548,87 @@ def _resolve_click_index(action: dict, shown: list[dict]) -> dict:
     return action
 
 
+# ── Click-by-title matching (local, deterministic) ────────────────────────────
+# "click on the video titled <X>" / "click on <X>" — match the spoken title
+# against the on-screen text directly instead of asking the model to count
+# items (which it does unreliably, e.g. "third video" hitting the second).
+# Filler words that aren't part of a real title.
+_STOP_MATCH = {
+    "the", "a", "an", "that", "this", "one", "please", "click", "on", "to", "of",
+    "and", "for", "with", "my", "it", "video", "link", "button", "tab", "icon",
+    "menu", "option", "field", "box", "bar", "page", "result", "item", "thumbnail",
+    "post", "article", "tile", "card", "story", "image", "picture", "called",
+    "titled", "named", "labeled", "title", "says", "saying",
+}
+_ORDINALS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh",
+             "eighth", "ninth", "tenth", "last", "next", "previous", "top", "bottom"}
+
+def _norm_text(s: str) -> str:
+    s = re.sub(r"[^\w\s]", " ", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+def _word_in(w: str, ewords: list[str]) -> bool:
+    """Is spoken word `w` present in an element's words (allowing fuzziness)?"""
+    for ew in ewords:
+        if w == ew:
+            return True
+        if len(w) >= 4 and (w in ew or ew in w):
+            return True
+        if len(w) >= 4 and difflib.SequenceMatcher(None, w, ew).ratio() >= 0.82:
+            return True
+    return False
+
+def _extract_click_target(command: str) -> str | None:
+    """Pull the title/description out of a click command, or None if it isn't one."""
+    m = re.match(r"(?i)^\s*(?:click|tap|press|open|play|select|choose|hit)\b\s*"
+                 r"(?:on\b\s*)?(.*)$", command.strip())
+    if not m:
+        return None
+    rest = m.group(1)
+    rest = re.sub(r"(?i)^\s*(?:the|that|this|a|an)\s+", "", rest)
+    rest = re.sub(r"(?i)^\s*(?:video|link|button|result|item|option|thumbnail|tab|"
+                  r"post|article|tile|card|story|image|picture)\s+", "", rest)
+    rest = re.sub(r"(?i)^\s*(?:titled|called|named|labeled|label|title|that\s+says|"
+                  r"saying|which\s+says|with\s+the\s+title|with\s+title)\s*[:\-]?\s*",
+                  "", rest)
+    return rest.strip(" '\"") or None
+
+def match_click_target(command: str, elements: list[dict]) -> dict | None:
+    """Return a click action on the element whose text best matches the spoken
+    title, or None if this isn't a title-click or nothing matches confidently."""
+    target = _extract_click_target(command)
+    if not target:
+        return None
+    words = [w for w in _norm_text(target).split()
+             if w not in _STOP_MATCH and w not in _ORDINALS
+             and not re.fullmatch(r"\d+(st|nd|rd|th)?", w)]
+    if not words:
+        return None        # pure ordinal / no real title — let Groq decide
+    target_clean = " ".join(words)
+
+    best, best_score = None, 0.0
+    for e in elements:
+        et = _norm_text(e["text"])
+        if not et:
+            continue
+        if target_clean and target_clean in et:
+            score = 1.0                                  # exact phrase contained
+        else:
+            ew = et.split()
+            matched = sum(1 for w in words if _word_in(w, ew))
+            score = matched / len(words)                 # fraction of words found
+        if score > best_score:                           # ties keep the topmost
+            best_score, best = score, e
+
+    if best is not None and best_score >= 0.6:
+        log("MATCH", f"title match {best_score:.2f}: {best['text'][:55]!r} "
+                     f"at ({best['x']}, {best['y']})")
+        return {"action": "click", "x": best["x"], "y": best["y"]}
+    log("MATCH", f"no confident title match for {target!r} "
+                 f"(best {best_score:.2f}) — falling back to Groq", "WARN")
+    return None
+
+
 def _paste_text(text: str):
     """Enter text by putting it on the clipboard and pasting it (Cmd+V).
 
@@ -940,13 +1022,19 @@ class App(tk.Tk):
             self._set_status(f"{label}{desc}", ACCENT)
             method, ecount = "shortcut", None
         else:
-            log("RESOLVE", f"{sub!r} -> no shortcut, using screenshot + Groq")
+            log("RESOLVE", f"{sub!r} -> no shortcut, taking a screenshot")
             self._set_status(f"{label}Looking at the screen…", ACCENT)
             elements = capture_screen_elements()
             ecount = len(elements)
-            self._set_status(f"{label}Asking AI…", ACCENT)
-            action = ask_groq(self.groq, sub, elements)
-            method = "vision"
+            # Try matching the spoken title directly first (deterministic);
+            # only ask Groq if no on-screen text matches confidently.
+            local = match_click_target(sub, elements)
+            if local is not None:
+                action, method = local, "match"
+            else:
+                self._set_status(f"{label}Asking AI…", ACCENT)
+                action = ask_groq(self.groq, sub, elements)
+                method = "vision"
         with Timer("EXECUTE"):
             result = execute_action(action)
         log("EXECUTE", f"result: {result}")
