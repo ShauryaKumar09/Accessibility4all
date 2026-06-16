@@ -121,8 +121,11 @@ Hold-to-talk voice commands that control Google Chrome.
      no screenshot/AI.
    - **Click by title** (`match_click_target`): for "click on the video titled X"
      / "click on X", the spoken title is fuzzy-matched directly against the
-     on-screen OCR text (deterministic) and that element is clicked. This is more
-     reliable than asking the model to count items ("third video").
+     on-screen OCR text (deterministic) and that element is clicked. More reliable
+     than asking the model to count items ("third video"). For **video** clicks it
+     aims at the **thumbnail** (above the title, via `_thumbnail_point`) so it
+     opens the video, never the channel name; "click a video" with no title clicks
+     the first plausible video's thumbnail.
    - **Vision fallback**: anything else / no confident title match →
      screenshot → `pytesseract` OCR → send the **numbered** element list to Groq
      → it returns the element **index** → we look up the verified coordinate.
