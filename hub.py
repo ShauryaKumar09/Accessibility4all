@@ -19,6 +19,10 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import font as tkfont
 
+from shared.console import configure_stdio, safe_print
+
+configure_stdio()
+
 ROOT = Path(__file__).parent.resolve()
 FEATURES_DIR = ROOT / "features"
 STATE_FILE = ROOT / "hub_state.json"     # remembers which toggles were on
@@ -62,11 +66,11 @@ def discover_features() -> list[Feature]:
             try:
                 manifest = json.loads(manifest_path.read_text())
             except Exception as e:
-                print(f"[hub] bad feature.json in '{child.name}': {e} — using defaults",
+                safe_print(f"[hub] bad feature.json in '{child.name}': {e} — using defaults",
                       flush=True)
         feat = Feature(child, manifest)
         if not feat.entry_path.exists():
-            print(f"[hub] skipping '{child.name}': entry '{feat.entry}' not found",
+            safe_print(f"[hub] skipping '{child.name}': entry '{feat.entry}' not found",
                   flush=True)
             continue
         features.append(feat)
@@ -87,7 +91,7 @@ def save_enabled(enabled: set[str]):
     try:
         STATE_FILE.write_text(json.dumps({"enabled": sorted(enabled)}, indent=2))
     except Exception as e:
-        print(f"[hub] could not save state: {e}", flush=True)
+        safe_print(f"[hub] could not save state: {e}", flush=True)
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -239,7 +243,7 @@ class Hub(tk.Tk):
     def _start(self, feat: Feature):
         if feat.id in self._procs and self._procs[feat.id].poll() is None:
             return                                  # already running
-        print(f"[hub] starting '{feat.name}' -> {feat.entry_path}", flush=True)
+        safe_print(f"[hub] starting '{feat.name}' -> {feat.entry_path}", flush=True)
         try:
             # Same interpreter (venv), cwd = the feature folder so relative paths
             # and .env resolve as the developer expects. stdout/stderr inherit
@@ -251,18 +255,18 @@ class Hub(tk.Tk):
             self._procs[feat.id] = proc
             self._render_row(feat.id, True, "running")
         except Exception as e:
-            print(f"[hub] failed to start '{feat.name}': {e}", flush=True)
+            safe_print(f"[hub] failed to start '{feat.name}': {e}", flush=True)
             self._render_row(feat.id, False, f"failed: {e}")
 
     def _stop(self, feat: Feature):
         proc = self._procs.get(feat.id)
         if proc and proc.poll() is None:
-            print(f"[hub] stopping '{feat.name}'", flush=True)
+            safe_print(f"[hub] stopping '{feat.name}'", flush=True)
             proc.terminate()
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                print(f"[hub] '{feat.name}' didn't exit, killing", flush=True)
+                safe_print(f"[hub] '{feat.name}' didn't exit, killing", flush=True)
                 proc.kill()
         self._procs.pop(feat.id, None)
         self._render_row(feat.id, False, "stopped")
@@ -291,7 +295,7 @@ class Hub(tk.Tk):
                 else:
                     self._render_row(feat.id, False, f"crashed (exit {code})",
                                      crashed=True)
-                    print(f"[hub] '{feat.name}' exited with code {code}", flush=True)
+                    safe_print(f"[hub] '{feat.name}' exited with code {code}", flush=True)
         self.after(self.POLL_MS, self._poll)
 
     # ── row rendering ──
@@ -312,7 +316,7 @@ class Hub(tk.Tk):
 
 
 if __name__ == "__main__":
-    print(f"[hub] Accessibility4all hub starting | features dir: {FEATURES_DIR}",
-          flush=True)
+    safe_print(f"[hub] Accessibility4all hub starting | features dir: {FEATURES_DIR}",
+               flush=True)
     Hub().mainloop()
-    print("[hub] hub closed", flush=True)
+    safe_print("[hub] hub closed", flush=True)
