@@ -43,8 +43,11 @@ in **System Settings → Privacy & Security**, for whichever app runs Python
 - **Screen Recording** — needed for screenshots/OCR.
 - **Microphone** — needed for voice capture.
 
-If clicks/hotkeys "do nothing," Accessibility permission is almost always the
-cause.
+Page Reader also needs **Accessibility** (global hotkeys, click-to-read) and
+**Screen Recording** (OCR).
+
+On **Windows**, allow microphone access if prompted; install Tesseract and
+Chrome for full functionality.
 
 ---
 
@@ -167,6 +170,21 @@ frames + store a float `level`. Worker threads update the UI only via
 
 Uses **`sounddevice`**, not PyAudio — PyAudio/PortAudio segfaulted on macOS
 (Core Audio error -50). Do not switch the audio I/O back to PyAudio.
+
+---
+
+## The `page_reader` feature
+
+Reads on-screen text aloud (OCR + TTS). See `features/page_reader/README.md`.
+
+- **Read screen** — default `F9` hotkey (user-configurable)
+- **Stop** — default `F10`
+- **Voice-guided sections** — when Voice Control is also on, say e.g. “read the billing information” (uses Groq)
+- **Click-to-read** — optional toggle; click any line to hear it
+
+Features coordinate via `feature_bus/commands.jsonl` and `feature_bus/presence.json`
+at the project root. Shared OCR lives in `shared/screen_ocr.py`; cross-platform
+helpers (Chrome focus, paste, shortcuts) live in `shared/platform.py`.
 
 ---
 
