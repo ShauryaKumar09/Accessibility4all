@@ -1,0 +1,7 @@
+{
+  "name": "Tone & Social Cues",
+  "description": "Explains the tone and social subtext of text. Highlight + hotkey from any app, or Shift+Click a paragraph in Chrome.",
+  "entry": "main.py",
+  "version": "0.1.0",
+  "author": "Accessibility4all"
+}

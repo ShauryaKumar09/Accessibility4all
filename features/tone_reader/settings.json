@@ -1,0 +1,8 @@
+{
+  "click_to_analyze": true,
+  "hotkeys": {
+    "analyze_selection": "shift+command+'"
+  },
+  "panel_font_size": 12,
+  "show_raw_on_parse_error": true
+}

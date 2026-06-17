@@ -106,6 +106,7 @@ _OVERLAY_PHRASES = (
     "accessibility4all", "page reader", "always on", "hover-to-read",
     "voice-guided", "groq summary", "read chrome", "processing",
     "didn't catch", "speak a command", "hold `", "listening",
+    "tone analysis", "social cues", "analyzing tone", "what it likely means",
 )
 
 
