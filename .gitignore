@@ -6,4 +6,7 @@ __pycache__/
 # generated / machine-local
 trials.jsonl
 hub_state.json
+feature_bus/commands.jsonl
+feature_bus/presence.json
+features/page_reader/settings.json
 .venv/

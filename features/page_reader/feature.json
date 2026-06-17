@@ -1,0 +1,7 @@
+{
+  "name": "Page Reader",
+  "description": "Reads on-screen text aloud. Click-to-read, configurable read-screen hotkey, and voice-guided sections when Voice Control is also on.",
+  "entry": "main.py",
+  "version": "0.1.0",
+  "author": "Accessibility4all"
+}

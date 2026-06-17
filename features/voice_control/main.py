@@ -28,6 +28,12 @@ from dotenv import load_dotenv
 load_dotenv()
 pyautogui.FAILSAFE = False
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from shared import feature_bus, platform as plat, screen_ocr  # noqa: E402
+
 # ── Trial logging ─────────────────────────────────────────────────────────────
 TRIAL_LOG = Path(__file__).parent / "trials.jsonl"
 
@@ -80,40 +86,6 @@ class Timer:
 GROQ_MODEL = "llama-3.3-70b-versatile"
 STT_TIMEOUT = 15          # seconds — max wait for Google speech-to-text
 GROQ_TIMEOUT = 30         # seconds — max wait for the Groq API call
-SYSTEM_PROMPT = """You are an accessibility assistant that controls a Mac (macOS) for disabled users, mostly inside Google Chrome.
-The user gives you a voice command plus a list of visible text elements on the screen with their (x, y) positions. The screen is {screen_w} wide by {screen_h} tall; its center is about ({center_x}, {center_y}).
-
-Your job is to decide what action to take and return ONLY a valid JSON object — no explanation, no markdown, no extra text.
-
-The screen elements are given to you as a NUMBERED list, like `[7] "Sign in" at (412, 88)`.
-
-Supported actions:
-- {{"action": "hotkey", "keys": [<str>, ...]}}
-- {{"action": "click", "index": <int>}}        ← click a listed element BY ITS NUMBER (preferred for clicks)
-- {{"action": "scroll", "direction": "up"|"down"|"left"|"right", "amount": <int>}}
-- {{"action": "type", "text": "<str>"}}
-
-IMPORTANT — prefer keyboard shortcuts. This is a Mac, so the modifier key is "command" (NOT "ctrl"). For common browser actions ALWAYS use a hotkey instead of clicking:
-- New tab: {{"action": "hotkey", "keys": ["command", "t"]}}
-- Close tab: {{"action": "hotkey", "keys": ["command", "w"]}}
-- Reopen closed tab: {{"action": "hotkey", "keys": ["command", "shift", "t"]}}
-- New window: {{"action": "hotkey", "keys": ["command", "n"]}}
-- Next/previous tab: ["command", "option", "right"] / ["command", "option", "left"]
-- Reload page: ["command", "r"]
-- Go back / forward: ["command", "["] / ["command", "]"]
-- Focus the address bar (to type a URL or search): ["command", "l"]
-- Find on page: ["command", "f"]
-- Scroll to top / bottom: use the scroll action.
-
-Rules:
-- If the command is a common browser/system action, use a hotkey. Use "click" ONLY when the user clearly refers to a specific visible label/button that has no keyboard shortcut.
-- To navigate to a website, return a hotkey to focus the address bar, OR a "type" action with the URL when the bar is already focused. Keep it to one action.
-- When clicking, pick the element from the numbered list whose text best matches the user's intent and return its NUMBER as "index". NEVER invent coordinates — only choose from the numbered elements you were given.
-- The elements are listed in reading order (roughly top-to-bottom, left-to-right). For ordinal/positional requests like "the first video", "the second link", "the top result", choose by that order among the relevant items. "The first video" usually means the first content title near the top of the list.
-- For "click on this/that <thing>", choose the element whose text names that thing (e.g. a video title, button label, or link text).
-- If NOTHING in the list matches the user's intent, do not guess a click. Prefer a hotkey, or return {{"action": "click", "index": -1}} to signal "no match".
-- Return ONLY the raw JSON object.
-"""
 
 # ── Push-to-talk recorder (sounddevice; no PyAudio, no Tk from audio thread) ──
 class PushToTalkRecorder:
@@ -182,87 +154,13 @@ def transcribe(audio: sr.AudioData) -> str:
 
 # ── Chrome focus ──────────────────────────────────────────────────────────────
 def activate_chrome() -> bool:
-    """Bring Google Chrome to the foreground before acting on it.
+    return plat.activate_chrome(log_fn=log)
 
-    Uses AppleScript via `osascript`. `activate` also launches Chrome if it is
-    not already running. Best-effort: a failure is logged but does not abort the
-    pipeline. A short pause lets the window actually take focus before we send
-    keystrokes / clicks.
-    """
-    try:
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Google Chrome" to activate'],
-            check=True, capture_output=True, timeout=5,
-        )
-        time.sleep(0.25)   # give the OS a moment to focus the window
-        log("CHROME", "Google Chrome activated (foreground)")
-        return True
-    except Exception as e:
-        log("CHROME", f"could not activate Chrome: {e}", "WARN")
-        return False
-
-# ── Chrome keyboard shortcuts (macOS) ─────────────────────────────────────────
-# Researched from Chrome's macOS shortcut reference. Each entry maps a spoken
-# intent (matched by regex on the lowercased command) to an action. The FIRST
-# match wins, so more specific phrases must come before more general ones
-# (e.g. "reopen closed tab" before "close tab", "incognito" before "new tab").
-# `_k(...)` builds a hotkey action; `_scroll(...)` builds a scroll action.
-def _k(*keys) -> dict:
-    return {"action": "hotkey", "keys": list(keys)}
-
+# ── Chrome keyboard shortcuts (macOS / Windows) ───────────────────────────────
 def _scroll(direction: str, amount: int = 5) -> dict:
     return {"action": "scroll", "direction": direction, "amount": amount}
 
-CHROME_SHORTCUTS: list[tuple[str, dict, str]] = [
-    # ── tabs & windows ──
-    (r"(reopen|restore|undo clos\w*|bring back).*(tab)", _k("command", "shift", "t"), "reopen closed tab"),
-    (r"(new|open).*(incognito|private)",                 _k("command", "shift", "n"), "new incognito window"),
-    (r"(new|open|another).*(window)",                    _k("command", "n"),          "new window"),
-    (r"(new|open|another|create).*(tab)",                _k("command", "t"),          "new tab"),
-    (r"(close|exit).*(window)",                          _k("command", "shift", "w"), "close window"),
-    (r"(close|exit).*(tab)",                             _k("command", "w"),          "close tab"),
-    (r"(next|forward).*(tab)|(tab).*(right)",            _k("command", "option", "right"), "next tab"),
-    (r"(previous|prev|last|back).*(tab)|(tab).*(left)",  _k("command", "option", "left"),  "previous tab"),
-    (r"(quit|close).*(chrome|browser)",                  _k("command", "q"),          "quit Chrome"),
-    (r"minimi[sz]e",                                     _k("command", "m"),          "minimize window"),
-    # ── navigation ──
-    (r"(hard|force|empty cache).*(reload|refresh)",      _k("command", "shift", "r"), "hard reload"),
-    (r"(reload|refresh)",                                _k("command", "r"),          "reload page"),
-    (r"(go )?forward",                                   _k("command", "]"),          "go forward"),
-    (r"(go )?back",                                      _k("command", "["),          "go back"),
-    (r"home ?page|go home",                              _k("command", "shift", "h"), "home page"),
-    (r"address bar|url bar|location bar|search bar|focus.*address|type.*(url|address)|go to (a |the )?(website|url|page)|open (a |the )?(website|url)|search( the web| google| online)?\b", _k("command", "l"), "focus address bar"),
-    # ── finding & page ──
-    (r"find next",                                       _k("command", "g"),          "find next"),
-    (r"find previous|find prev",                         _k("command", "shift", "g"), "find previous"),
-    (r"find|search.*(on|in).*(page)",                    _k("command", "f"),          "find on page"),
-    (r"\bprint\b",                                       _k("command", "p"),          "print"),
-    (r"save.*(page|this)|^save",                         _k("command", "s"),          "save page"),
-    (r"zoom in|make.*(big|larg)|increase.*(zoom|text|size)", _k("command", "="),      "zoom in"),
-    (r"zoom out|make.*(small)|decrease.*(zoom|text|size)",   _k("command", "-"),      "zoom out"),
-    (r"reset zoom|actual size|default zoom|normal size",    _k("command", "0"),       "reset zoom"),
-    (r"full ?screen",                                    _k("command", "ctrl", "f"),  "toggle full screen"),
-    (r"(scroll|go|jump).*(top|beginning|start)|^top",   _k("command", "up"),         "scroll to top"),
-    (r"(scroll|go|jump).*(bottom|end)|^bottom",         _k("command", "down"),       "scroll to bottom"),
-    (r"scroll (down|up)",                               None,                         "scroll"),  # handled specially below
-    # ── bookmarks / history / downloads / tools ──
-    (r"bookmark all",                                    _k("command", "shift", "d"), "bookmark all tabs"),
-    (r"bookmark",                                        _k("command", "d"),          "bookmark page"),
-    (r"(show|hide|toggle).*(bookmark bar|bookmarks bar)", _k("command", "shift", "b"),"toggle bookmarks bar"),
-    (r"\bhistory\b",                                     _k("command", "y"),          "open history"),
-    (r"\bdownloads?\b",                                  _k("command", "shift", "j"), "open downloads"),
-    (r"clear.*(browsing|history|data)",                 _k("command", "shift", "backspace"), "clear browsing data"),
-    (r"settings|preferences",                            _k("command", ","),          "open settings"),
-    (r"dev(eloper)? tools|inspect",                      _k("command", "option", "i"),"open dev tools"),
-    (r"view (page )?source",                             _k("command", "option", "u"),"view source"),
-    # ── editing ──
-    (r"select all",                                      _k("command", "a"),          "select all"),
-    (r"\bcopy\b",                                        _k("command", "c"),          "copy"),
-    (r"\bpaste\b",                                       _k("command", "v"),          "paste"),
-    (r"\bcut\b",                                         _k("command", "x"),          "cut"),
-    (r"\bredo\b",                                        _k("command", "shift", "z"), "redo"),
-    (r"\bundo\b",                                        _k("command", "z"),          "undo"),
-]
+CHROME_SHORTCUTS: list[tuple[str, dict, str]] = plat.chrome_shortcut_table()
 _COMPILED_SHORTCUTS = [(re.compile(p), a, d) for p, a, d in CHROME_SHORTCUTS]
 
 
@@ -320,7 +218,7 @@ def _match_typing(command: str) -> tuple[dict | None, str | None]:
     if m:
         payload, _ = _strip_target(m.group(1))
         if payload.strip().lower() not in _NON_PAYLOAD:
-            return (_seq(_k("command", "l"), _type(payload, enter=True)),
+            return (_seq(plat.hotkey_action("mod", "l"), _type(payload, enter=True)),
                     f"search the web for {payload!r}")
 
     # 2) Navigate to a website:  "go to youtube.com" / "open netflix.com"
@@ -330,7 +228,7 @@ def _match_typing(command: str) -> tuple[dict | None, str | None]:
         raw = m.group(1).strip()
         norm = _normalize_url(raw)
         if _looks_like_url(raw) or _looks_like_url(norm):
-            return (_seq(_k("command", "l"), _type(norm, enter=True)),
+            return (_seq(plat.hotkey_action("mod", "l"), _type(norm, enter=True)),
                     f"open website {norm!r}")
 
     # 3) Type text:  "type X" / "enter X" / "paste X" [into the search/address bar]
@@ -349,7 +247,7 @@ def _match_typing(command: str) -> tuple[dict | None, str | None]:
         # If they named the address/search bar, focus it (Cmd+L) before pasting;
         # otherwise paste into whatever field already has focus.
         if target and re.search(r"address|url|location|omnibox|search", target):
-            return (_seq(_k("command", "l"), _type(payload, enter=enter)),
+            return (_seq(plat.hotkey_action("mod", "l"), _type(payload, enter=enter)),
                     f"type {payload!r} in the address bar")
         return _type(payload, enter=enter), f"type {payload!r}"
 
@@ -414,68 +312,54 @@ def _changes_page(action: dict) -> bool:
         return any(_changes_page(s) for s in action.get("steps", []))
     if k == "hotkey":
         keys = list(action.get("keys", []))
-        nav = (["command", "r"], ["command", "shift", "r"], ["command", "["],
-               ["command", "]"], ["command", "t"])
+        m = plat.mod_key()
+        nav = ([m, "r"], [m, "shift", "r"], [m, "["], [m, "]"], [m, "t"])
+        if not plat.IS_MAC:
+            nav = ([m, "r"], [m, "shift", "r"], ["alt", "left"], ["alt", "right"], [m, "t"])
         return keys in [list(x) for x in nav]
     return False
 
+# ── Page Reader command forwarding ─────────────────────────────────────────────
+_READ_SCREEN_RE = re.compile(r"^read\s+screen\s*$", re.I)
+_STOP_READING_RE = re.compile(r"^stop\s+reading\s*$", re.I)
+_READ_LAST_RE = re.compile(
+    r"^read\s+(?:that\s+(?:again|section)|it\s+again)\s*$", re.I)
+_READ_SECTION_RE = re.compile(r"^read(?:\s+out)?(?:\s+the)?\s+(.+)$", re.I)
+
+
+def match_read_command(command: str) -> dict | None:
+    """If command is a page-reader intent, return {cmd, ...} else None."""
+    cmd = command.strip()
+    if _READ_SCREEN_RE.match(cmd):
+        return {"cmd": "read_screen"}
+    if _STOP_READING_RE.match(cmd):
+        return {"cmd": "stop"}
+    if _READ_LAST_RE.match(cmd):
+        return {"cmd": "read_last"}
+    m = _READ_SECTION_RE.match(cmd)
+    if m:
+        return {"cmd": "read_section", "text": m.group(1).strip()}
+    return None
+
+
+def try_forward_to_page_reader(command: str) -> tuple[bool, str | None]:
+    """Forward read intents to page_reader. Returns (handled, error_message)."""
+    intent = match_read_command(command)
+    if intent is None:
+        return False, None
+    if not feature_bus.is_feature_running("page_reader"):
+        return True, "Turn on Page Reader first"
+    settings = feature_bus.load_page_reader_settings()
+    if not settings.get("voice_guided", True):
+        return True, "Enable voice-guided read in Page Reader"
+    feature_bus.append_command(from_feature="voice_control", **intent)
+    log("READ", f"forwarded to page_reader: {intent}")
+    return True, None
+
 # ── Core pipeline functions ───────────────────────────────────────────────────
 def capture_screen_elements() -> list[dict]:
-    with Timer("SCREENSHOT"):
-        screenshot = pyautogui.screenshot()
-    # On Retina displays the screenshot is in PHYSICAL pixels (e.g. 2704x1756)
-    # while pyautogui clicks in LOGICAL coordinates (e.g. 1352x878). OCR gives
-    # coordinates in the screenshot's pixel space, so we must scale them down to
-    # the logical space or every click lands in the wrong place / off-screen.
-    logical_w, logical_h = pyautogui.size()
-    phys_w, phys_h = screenshot.size
-    scale_x = logical_w / phys_w
-    scale_y = logical_h / phys_h
-    log("SCREENSHOT", f"captured {phys_w}x{phys_h} image | "
-                      f"logical screen {logical_w}x{logical_h} | "
-                      f"scale x={scale_x:.3f} y={scale_y:.3f}")
-    with Timer("OCR", "running pytesseract (this can be the slow stage)"):
-        data = pytesseract.image_to_data(
-            screenshot, output_type=pytesseract.Output.DICT
-        )
-    # pytesseract returns WORD-level boxes, so a title like "How to cook pasta"
-    # arrives as 4 separate words. We group words back into LINES (same block /
-    # paragraph / line) so each element is a whole label/title — otherwise the
-    # model can't match "the second video" against scattered single words.
-    groups: dict[tuple, dict] = {}
-    for i in range(len(data["text"])):
-        text = data["text"][i].strip()
-        if not text or int(data["conf"][i]) < 40:
-            continue
-        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
-        left, top = data["left"][i], data["top"][i]
-        right, bottom = left + data["width"][i], top + data["height"][i]
-        g = groups.get(key)
-        if g is None:
-            groups[key] = {"words": [text], "x0": left, "y0": top,
-                           "x1": right, "y1": bottom}
-        else:
-            g["words"].append(text)
-            g["x0"], g["y0"] = min(g["x0"], left), min(g["y0"], top)
-            g["x1"], g["y1"] = max(g["x1"], right), max(g["y1"], bottom)
-
-    elements = []
-    for g in groups.values():       # dict preserves OCR (top-to-bottom) order
-        text = " ".join(g["words"]).strip()
-        if not text:
-            continue
-        cx = (g["x0"] + g["x1"]) / 2     # click the CENTER of the whole line
-        cy = (g["y0"] + g["y1"]) / 2
-        elements.append({
-            "text": text,
-            "x": int(cx * scale_x), "y": int(cy * scale_y),   # center (logical)
-            "x0": int(g["x0"] * scale_x), "y0": int(g["y0"] * scale_y),  # bbox
-            "x1": int(g["x1"] * scale_x), "y1": int(g["y1"] * scale_y),
-        })
-    sample = " | ".join(e["text"][:30] for e in elements[:10])
-    log("OCR", f"found {len(elements)} line elements (grouped from words). "
-               f"sample: {sample}")
-    return elements
+    with Timer("SCREENSHOT", "delegating to shared OCR"):
+        return screen_ocr.capture_screen_elements(log_fn=log)
 
 
 MAX_ELEMENTS = 120          # how many OCR line-elements we show the model
@@ -490,9 +374,8 @@ def ask_groq(client: Groq, command: str, elements: list[dict]) -> dict:
     )
     user_message = f'Voice command: "{command}"\n\nVisible screen elements:\n{element_lines}'
     screen_w, screen_h = pyautogui.size()
-    system_prompt = SYSTEM_PROMPT.format(
-        screen_w=screen_w, screen_h=screen_h,
-        center_x=screen_w // 2, center_y=screen_h // 2,
+    system_prompt = plat.chrome_system_prompt(
+        screen_w, screen_h, screen_w // 2, screen_h // 2,
     )
     log("GROQ", f"calling {GROQ_MODEL} with {len(shown)} elements "
                 f"(timeout {GROQ_TIMEOUT}s)")
@@ -690,26 +573,7 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
 
 
 def _paste_text(text: str):
-    """Enter text by putting it on the clipboard and pasting it (Cmd+V).
-
-    On macOS simulated keystrokes (pyautogui.typewrite) are unreliable — they
-    often drop characters or type nothing — while Cmd+V is rock solid. We save
-    and restore the user's existing clipboard so we don't clobber it.
-    """
-    saved = None
-    try:
-        saved = subprocess.run(["pbpaste"], capture_output=True, timeout=2).stdout
-    except Exception:
-        pass
-    subprocess.run(["pbcopy"], input=text.encode("utf-8"), timeout=2)
-    time.sleep(0.05)
-    pyautogui.hotkey("command", "v")
-    time.sleep(0.15)                      # let the paste land before restoring
-    if saved is not None:
-        try:
-            subprocess.run(["pbcopy"], input=saved, timeout=2)
-        except Exception:
-            pass
+    plat.paste_text(text)
 
 
 def execute_action(action: dict) -> str:
@@ -741,7 +605,7 @@ def execute_action(action: dict) -> str:
             pyautogui.hscroll(amount)
         return f"Scrolled {direction} by {amount}"
     elif kind == "hotkey":
-        keys = action.get("keys", [])
+        keys = plat.normalize_hotkey_keys(action.get("keys", []))
         pyautogui.hotkey(*keys)
         return f"Hotkey: {'+'.join(keys)}"
     elif kind == "type":
@@ -780,7 +644,15 @@ class App(tk.Tk):
         self._grave_down = False
         self._build_ui()
         self._reset_idle()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        hint = plat.permission_hints("voice_control")
+        if hint:
+            log("STARTUP", hint)
         self._start_key_listener()
+
+    def _on_close(self):
+        feature_bus.remove_presence("voice_control")
+        self.destroy()
 
     def _build_ui(self):
         self.title("Accessibility4all")
@@ -830,6 +702,15 @@ class App(tk.Tk):
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 80}")
         self.lift()
+        self.bind("<Configure>", lambda e: self.after(100, self._update_presence))
+        self.after(100, self._update_presence)
+
+    def _update_presence(self):
+        feature_bus.update_presence(
+            "voice_control",
+            os.getpid(),
+            {"x": self.winfo_x(), "y": self.winfo_y(), "w": 300, "h": 152},
+        )
 
     # ── meter (polled on the main thread; never updated from audio thread) ──
     def _draw_meter(self, energy: float):
@@ -859,11 +740,33 @@ class App(tk.Tk):
         color = {"idle": IDLE_DOT, "rec": REC, "busy": ACCENT, "done": OK}.get(state, IDLE_DOT)
         self.after(0, lambda: self.mic_btn.configure(bg=color))
 
-    # ── global ` (backtick) push-to-talk via a Quartz event tap ──
+    # ── global ` (backtick) push-to-talk ───────────────────────────────────────
     def _start_key_listener(self):
-        """Listen for the ` key system-wide so the user can talk while Chrome is
-        focused. We suppress the key so it never types a backtick. Requires
-        Accessibility permission; if denied, the mic dot still works as fallback."""
+        """Listen for the ` key system-wide (Quartz on macOS, pynput elsewhere)."""
+        if plat.IS_MAC:
+            self._start_mac_quartz_listener()
+        else:
+            self._start_pynput_grave_listener()
+
+    def _start_pynput_grave_listener(self):
+        from pynput import keyboard as pkb
+
+        def on_press(key):
+            if self._busy or self._recording:
+                return
+            if hasattr(key, "char") and key.char == "`":
+                self._key_q.put("down")
+
+        def on_release(key):
+            if hasattr(key, "char") and key.char == "`":
+                self._key_q.put("up")
+
+        listener = pkb.Listener(on_press=on_press, on_release=on_release)
+        listener.start()
+        log("HOTKEY", "global ` (backtick) push-to-talk active (pynput)")
+        self._poll_keys()
+
+    def _start_mac_quartz_listener(self):
         try:
             import Quartz
         except Exception as e:
@@ -1012,6 +915,21 @@ class App(tk.Tk):
             trial["command"] = command
             self._set_status(f'Heard: "{command}"', ACCENT)
 
+            handled, err = try_forward_to_page_reader(command)
+            if handled:
+                if err:
+                    self._set_status(err, WARN)
+                    trial["error"] = err
+                    trial["success"] = False
+                else:
+                    self._set_status("Sent to Page Reader", OK)
+                    trial["forwarded"] = "page_reader"
+                    trial["success"] = True
+                    self._set_trial_info("read command → page_reader")
+                    log("PIPELINE", "SUCCESS — forwarded to page_reader")
+                _log_trial(trial)
+                return
+
             # ── Stage 2: make sure Chrome is the active app ──────────────────
             log("PIPELINE", "step 2 — focus Google Chrome")
             self._set_status("Focusing Chrome…", ACCENT)
@@ -1129,6 +1047,7 @@ if __name__ == "__main__":
     except Exception as e:
         log("STARTUP", f"failed to start: {type(e).__name__}: {e}", "ERROR")
         raise
-    log("STARTUP", "UI ready — hold the button and speak")
+    log("STARTUP", "UI ready — hold the ` key or ● dot to talk")
     app.mainloop()
+    feature_bus.remove_presence("voice_control")
     log("SHUTDOWN", "main loop exited")
