@@ -1,0 +1,48 @@
+:root.a4a-dyslexia-font-enabled {
+  --a4a-dyslexia-font-family: "OpenDyslexic", "Atkinson Hyperlegible", "Comic Sans MS", Arial, sans-serif;
+  --a4a-dyslexia-letter-spacing: 0.03em;
+  --a4a-dyslexia-line-height: 1.55;
+  --a4a-dyslexia-font-weight: inherit;
+}
+
+:root.a4a-dyslexia-font-enabled body,
+:root.a4a-dyslexia-font-enabled p,
+:root.a4a-dyslexia-font-enabled li,
+:root.a4a-dyslexia-font-enabled a,
+:root.a4a-dyslexia-font-enabled button,
+:root.a4a-dyslexia-font-enabled input,
+:root.a4a-dyslexia-font-enabled textarea,
+:root.a4a-dyslexia-font-enabled select,
+:root.a4a-dyslexia-font-enabled summary,
+:root.a4a-dyslexia-font-enabled label,
+:root.a4a-dyslexia-font-enabled blockquote,
+:root.a4a-dyslexia-font-enabled figcaption,
+:root.a4a-dyslexia-font-enabled td,
+:root.a4a-dyslexia-font-enabled th,
+:root.a4a-dyslexia-font-enabled h1,
+:root.a4a-dyslexia-font-enabled h2,
+:root.a4a-dyslexia-font-enabled h3,
+:root.a4a-dyslexia-font-enabled h4,
+:root.a4a-dyslexia-font-enabled h5,
+:root.a4a-dyslexia-font-enabled h6 {
+  font-family: var(--a4a-dyslexia-font-family) !important;
+  font-weight: var(--a4a-dyslexia-font-weight) !important;
+  letter-spacing: var(--a4a-dyslexia-letter-spacing) !important;
+  line-height: var(--a4a-dyslexia-line-height) !important;
+}
+
+:root.a4a-dyslexia-font-enabled code,
+:root.a4a-dyslexia-font-enabled pre,
+:root.a4a-dyslexia-font-enabled kbd,
+:root.a4a-dyslexia-font-enabled samp,
+:root.a4a-dyslexia-font-enabled var,
+:root.a4a-dyslexia-font-enabled svg,
+:root.a4a-dyslexia-font-enabled canvas,
+:root.a4a-dyslexia-font-enabled [class*="icon"],
+:root.a4a-dyslexia-font-enabled [class*="fa-"],
+:root.a4a-dyslexia-font-enabled [class*="material-icons"],
+:root.a4a-dyslexia-font-enabled [aria-hidden="true"] {
+  font-family: revert !important;
+  letter-spacing: revert !important;
+  line-height: revert !important;
+}

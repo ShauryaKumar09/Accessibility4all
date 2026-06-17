@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Accessibility4all Dyslexia Font",
+  "version": "0.1.0",
+  "description": "Applies dyslexia-friendly font settings to websites.",
+  "action": {
+    "default_title": "Accessibility4all Dyslexia Font",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["dyslexia.css"],
+      "run_at": "document_start"
+    }
+  ],
+  "options_page": "options.html",
+  "permissions": ["storage"]
+}
