@@ -32,7 +32,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import feature_bus, platform as plat, screen_ocr  # noqa: E402
+from shared import console, feature_bus, platform as plat, screen_ocr  # noqa: E402
+
+console.configure_stdio()
 
 # ── Trial logging ─────────────────────────────────────────────────────────────
 TRIAL_LOG = Path(__file__).parent / "trials.jsonl"
@@ -52,7 +54,7 @@ def log(stage: str, msg: str = "", level: str = "INFO"):
     ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
     line = f"[{ts}] [{level:<5}] {stage:<14} {msg}".rstrip()
     with _LOG_LOCK:
-        print(line, flush=True)
+        console.safe_print(line, flush=True)
 
 class Timer:
     """Context manager that logs the start, end, and duration of a stage.

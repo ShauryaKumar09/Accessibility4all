@@ -27,8 +27,9 @@ ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import feature_bus, platform as plat, screen_ocr  # noqa: E402
+from shared import console, feature_bus, platform as plat, screen_ocr  # noqa: E402
 
+console.configure_stdio()
 load_dotenv()
 
 SETTINGS_FILE = FEATURE_DIR / "settings.json"
@@ -60,7 +61,7 @@ MARGIN = 12
 
 
 def log(msg: str):
-    print(f"[page_reader] {msg}", flush=True)
+    console.safe_print(f"[page_reader] {msg}", flush=True)
 
 
 def default_settings() -> dict:
