@@ -628,11 +628,15 @@ def _resolve_click_index(action: dict, shown: list[dict]) -> dict:
 # Filler words that aren't part of a real title.
 _STOP_MATCH = {
     "the", "a", "an", "that", "this", "one", "please", "click", "on", "to", "of",
-    "and", "for", "with", "my", "it", "video", "link", "button", "tab", "icon",
-    "menu", "option", "field", "box", "bar", "page", "result", "item", "thumbnail",
-    "post", "article", "tile", "card", "story", "image", "picture", "called",
-    "titled", "named", "labeled", "title", "says", "saying",
+    "and", "for", "with", "my", "it", "video", "videos", "link", "button", "tab",
+    "icon", "menu", "option", "field", "box", "bar", "page", "result", "results",
+    "item", "thumbnail", "post", "article", "tile", "card", "story", "image",
+    "picture", "called", "titled", "named", "labeled", "title", "says", "saying",
+    "clip", "movie", "onto", "watch",
 }
+# A click-on-element command (never a Chrome keyboard shortcut) — used to keep
+# title words like "reload"/"settings" from being mistaken for a shortcut.
+_CLICK_INTENT = re.compile(r"(?i)^\s*(?:click|tap|press|select|choose)\b")
 _ORDINALS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh",
              "eighth", "ninth", "tenth", "last", "next", "previous", "top", "bottom"}
 _ORDINAL_MAP = {
@@ -689,11 +693,15 @@ def _thumbnail_point(title: dict, elements: list[dict], screen_h: int) -> tuple[
             continue
         if e["x1"] >= tx0 - 20 and e["x0"] <= tx1 + 20:  # same column
             above_bottom = max(above_bottom or 0, e["y1"])
-    if above_bottom is not None and (top - above_bottom) > 40:
-        # thumbnail roughly spans [above_bottom, top]; aim at its lower-middle
-        ty = int(above_bottom + (top - above_bottom) * 0.55)
+    gap = (top - above_bottom) if above_bottom is not None else None
+    if gap is not None and gap > 40:
+        # thumbnail spans [above_bottom, top]; cap its assumed height so a huge
+        # gap (e.g. top row) can't push the click into the tabs/another row.
+        thumb_h = min(gap, 220)
+        ty = top - int(thumb_h * 0.5)                   # aim at thumbnail middle
     else:
-        ty = int(top - max(60, 0.08 * screen_h))        # fixed fallback offset
+        ty = top - 100                                  # moderate fixed offset
+    ty = max(ty, int(screen_h * 0.10))                  # never up in the tab bar
     return cx, max(ty, 1)
 
 
@@ -763,36 +771,53 @@ def _match_tab_label(command: str, elements: list[dict]) -> dict | None:
     return None
 
 
+def _best_title_match(words: list[str], elements: list[dict], is_video: bool,
+                      screen_w: int, screen_h: int) -> tuple[dict | None, float]:
+    """Find the element whose text best matches the spoken title words.
+
+    When it's a video click we only consider plausible video-title lines (not the
+    channel name, sidebar, or chrome), which avoids landing on the wrong thing.
+    Confidence requires either the exact phrase or most spoken words present, so a
+    single shared word won't trigger the wrong video."""
+    target = " ".join(words)
+    pool = elements
+    if is_video:
+        vc = _clickable_candidates(elements, screen_w, screen_h, video_only=True)
+        if vc:
+            pool = vc
+
+    best, best_key = None, None
+    for e in pool:
+        et = _norm_text(e["text"])
+        if not et:
+            continue
+        ew = et.split()
+        matched = sum(1 for w in words if _word_in(w, ew))
+        coverage = matched / len(words)
+        contiguous = target in et
+        seq = difflib.SequenceMatcher(None, target, et).ratio()
+        key = (coverage + (0.5 if contiguous else 0.0), seq)   # disambiguate ties
+        if best_key is None or key > best_key:
+            best_key, best = key, e
+
+    if best is None:
+        return None, 0.0
+    et = _norm_text(best["text"])
+    coverage = sum(1 for w in words if _word_in(w, et.split())) / len(words)
+    confident = (target in et) or coverage >= (1.0 if len(words) == 1 else 0.6)
+    return (best, coverage) if confident else (None, coverage)
+
+
 def match_click_target(command: str, elements: list[dict]) -> dict | None:
     """Return a click action for a 'click on …' command, or None to defer to Groq.
 
-    For video clicks we aim at the thumbnail (above the title) so it always opens
-    the video, never the channel name. For other targets (buttons/links) we click
-    the matched text itself."""
+    Priority: (1) match a spoken title/description, (2) an ordinal, (3) a results
+    tab/category, (4) a generic "a video". For video clicks we aim at the
+    thumbnail (above the title) so it always opens the video, never the channel
+    name or a different tab."""
     is_video = bool(re.search(r"\b(video|thumbnail|clip|movie)\b", command, re.I)) \
         or bool(re.match(r"(?i)\s*play\b", command))
     screen_w, screen_h = pyautogui.size()
-
-    tab = _match_tab_label(command, elements)
-    if tab is not None:
-        return tab
-
-    oidx = _ordinal_index(command)
-    if oidx is not None and re.search(r"\b(click|tap|press|select|open|play)\b", command, re.I):
-        video_mode = is_video or bool(
-            re.search(r"\b(video|result|thumbnail|link|item|title)\b", command, re.I))
-        cands = _clickable_candidates(elements, screen_w, screen_h, video_only=video_mode)
-        if not cands:
-            cands = _clickable_candidates(elements, screen_w, screen_h, video_only=False)
-        if cands:
-            pick = cands[oidx] if oidx >= 0 else cands[-1]
-            if video_mode or is_video:
-                x, y = _thumbnail_point(pick, elements, screen_h)
-            else:
-                x, y = screen_ocr.click_point_for_element(pick)
-            which = "last" if oidx < 0 else f"#{oidx + 1}"
-            log("MATCH", f"ordinal {which} -> {pick['text'][:50]!r} at ({x}, {y})")
-            return {"action": "click", "x": x, "y": y}
 
     target = _extract_click_target(command)
     words = []
@@ -801,42 +826,53 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
                  if w not in _STOP_MATCH and w not in _ORDINALS
                  and not re.fullmatch(r"\d+(st|nd|rd|th)?", w)]
 
+    # 1) Title / description match — the main "click the video <a few words>" path.
     if words:
-        target_clean = " ".join(words)
-        best, best_score = None, 0.0
-        for e in elements:
-            et = _norm_text(e["text"])
-            if not et:
-                continue
-            if target_clean in et:
-                score = 1.0                              # exact phrase contained
-            else:
-                matched = sum(1 for w in words if _word_in(w, et.split()))
-                score = matched / len(words)             # fraction of words found
-            if score > best_score:                       # ties keep the topmost
-                best_score, best = score, e
-        if best is not None and best_score >= 0.6:
+        best, score = _best_title_match(words, elements, is_video, screen_w, screen_h)
+        if best is not None:
             if is_video:
                 x, y = _thumbnail_point(best, elements, screen_h)
-                log("MATCH", f"title match {best_score:.2f}: {best['text'][:50]!r} "
-                             f"-> clicking thumbnail at ({x}, {y})")
+                log("MATCH", f"video title {score:.2f}: {best['text'][:50]!r} "
+                             f"-> thumbnail ({x}, {y})")
             else:
                 x, y = screen_ocr.click_point_for_element(best)
-                log("MATCH", f"text match {best_score:.2f}: {best['text'][:50]!r} "
+                log("MATCH", f"text match {score:.2f}: {best['text'][:50]!r} "
                              f"at ({x}, {y})")
             return {"action": "click", "x": x, "y": y}
-        log("MATCH", f"no confident match for {target!r} (best {best_score:.2f})"
+        log("MATCH", f"no confident match for {target!r} (best {score:.2f})"
                      f" — falling back to Groq", "WARN")
         return None
 
-    # No title given. If they said "click a video"/"play a video", pick the first
-    # plausible video and click its thumbnail.
+    # 2) Ordinal ("click the third video").
+    oidx = _ordinal_index(command)
+    if oidx is not None and re.search(r"\b(click|tap|press|select|open|play)\b", command, re.I):
+        video_mode = is_video or bool(
+            re.search(r"\b(video|result|thumbnail|link|item|title)\b", command, re.I))
+        cands = _clickable_candidates(elements, screen_w, screen_h, video_only=video_mode)
+        if not cands:
+            cands = _clickable_candidates(elements, screen_w, screen_h, video_only=False)
+        if cands:
+            idx = oidx if oidx >= 0 else len(cands) - 1
+            if 0 <= idx < len(cands):
+                pick = cands[idx]
+                x, y = (_thumbnail_point(pick, elements, screen_h) if video_mode
+                        else screen_ocr.click_point_for_element(pick))
+                which = "last" if oidx < 0 else f"#{oidx + 1}"
+                log("MATCH", f"ordinal {which} -> {pick['text'][:50]!r} at ({x}, {y})")
+                return {"action": "click", "x": x, "y": y}
+
+    # 3) Results tab / category ("click the videos tab", "go to images") — only
+    #    reaches here when there's no real title, so it can't hijack a title click.
+    tab = _match_tab_label(command, elements)
+    if tab is not None:
+        return tab
+
+    # 4) Generic "click a video" with no title → first plausible video thumbnail.
     if is_video:
         cand = _first_video_title(elements, screen_w, screen_h)
         if cand is not None:
             x, y = _thumbnail_point(cand, elements, screen_h)
-            log("MATCH", f"generic video -> first title {cand['text'][:50]!r} "
-                         f"-> clicking thumbnail at ({x}, {y})")
+            log("MATCH", f"generic video -> {cand['text'][:50]!r} -> thumbnail ({x}, {y})")
             return {"action": "click", "x": x, "y": y}
     return None        # let Groq handle anything else
 
@@ -1365,7 +1401,13 @@ class App(tk.Tk):
         first; otherwise takes a FRESH screenshot and asks Groq what to do, so
         stacked steps act on the current screen (e.g. click after navigating).
         `label` prefixes the on-screen status (e.g. "Step 2/3 · ")."""
-        action, desc = match_shortcut(sub)
+        # A "click/tap/select …" command is never a Chrome shortcut, so skip the
+        # shortcut table — otherwise a title word like "reload" or "settings"
+        # could fire the wrong hotkey instead of clicking the element.
+        if _CLICK_INTENT.match(sub):
+            action, desc = None, None
+        else:
+            action, desc = match_shortcut(sub)
         if action is not None:
             log("RESOLVE", f"{sub!r} -> shortcut: {desc}")
             self._set_status(f"{label}{desc}", ACCENT)
