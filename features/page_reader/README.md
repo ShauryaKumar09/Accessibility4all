@@ -27,7 +27,7 @@ Reads on-screen text aloud using OCR + text-to-speech. Works on **macOS** and **
 ## Permissions
 
 **macOS** — System Settings → Privacy & Security:
-- **Accessibility** — global hotkeys and click-to-read
+- **Accessibility** — global hotkeys and hover-to-read
 - **Screen Recording** — OCR screenshots
 
 **Windows** — allow microphone/screen access if prompted. Global hotkeys may require running the terminal as administrator if they do not register.
@@ -38,11 +38,11 @@ Toggle **Page Reader** ON in the hub (`python hub.py`).
 
 | Action | How |
 |--------|-----|
-| Read entire screen | Default hotkey **F9** (configurable in the Page Reader panel) |
+| Read Chrome page | Default hotkey **F9** (focuses Chrome, reads only the browser window) |
 | Stop speaking | Default hotkey **F10** |
 | Read a section by voice | Voice Control ON + “Voice-guided sections” → e.g. “read the billing information” |
 | Read last section | “read that again” (via Voice Control) |
-| Click-to-read | Enable in settings, then click any text |
+| Hover-to-read | Enable in settings, pause the mouse over text (~0.5s) |
 
 No on-screen read/stop buttons — use hotkeys or voice.
 
@@ -51,5 +51,6 @@ No on-screen read/stop buttons — use hotkeys or voice.
 Saved to `settings.json` in this folder (created on first run):
 
 - Voice-guided sections
-- Click-to-read
+- Hover-to-read
 - Custom hotkeys (supports Ctrl/Command, Alt/Option, Shift, and function keys)
+- Speech rate (default 120 wpm — slower than before)

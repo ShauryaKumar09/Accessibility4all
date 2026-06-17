@@ -13,6 +13,24 @@ import pyautogui
 IS_MAC = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
 
+_dpi_configured = False
+
+
+def enable_dpi_awareness():
+    """Use physical pixel coords on Windows so OCR and clicks align."""
+    global _dpi_configured
+    if _dpi_configured or not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+    _dpi_configured = True
+
 MAC_TESSERACT_PATHS = (
     "/opt/homebrew/bin/tesseract",
     "/usr/local/bin/tesseract",
@@ -71,6 +89,44 @@ def paste_text(text: str):
             pyperclip.copy(saved)
         except Exception:
             pass
+
+
+def get_chrome_window_bounds(log_fn=None) -> tuple[int, int, int, int] | None:
+    """Return (left, top, width, height) of the front Chrome window, or None."""
+    def _log(msg: str, level: str = "INFO"):
+        if log_fn:
+            log_fn("CHROME", msg, level)
+
+    try:
+        if IS_MAC:
+            result = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "Google Chrome" to get bounds of front window'],
+                check=True, capture_output=True, text=True, timeout=5,
+            )
+            parts = [int(p.strip()) for p in result.stdout.strip().split(",")]
+            if len(parts) != 4:
+                return None
+            left, top, right, bottom = parts
+            width, height = right - left, bottom - top
+        elif IS_WINDOWS:
+            import pygetwindow as gw
+
+            wins = [w for w in gw.getAllWindows()
+                    if w.title and "chrome" in w.title.lower() and w.visible]
+            if not wins:
+                return None
+            w = wins[0]
+            left, top, width, height = w.left, w.top, w.width, w.height
+        else:
+            return None
+        if width < 50 or height < 50:
+            return None
+        _log(f"Chrome window {width}x{height} at ({left}, {top})")
+        return left, top, width, height
+    except Exception as e:
+        _log(f"could not get Chrome bounds: {e}", "WARN")
+        return None
 
 
 def activate_chrome(log_fn=None) -> bool:
@@ -226,7 +282,17 @@ def chrome_shortcut_table() -> list[tuple[str, dict, str]]:
         (r"full ?screen", fullscreen, "toggle full screen"),
         (r"(scroll|go|jump).*(top|beginning|start)|^top", scroll_top, "scroll to top"),
         (r"(scroll|go|jump).*(bottom|end)|^bottom", scroll_bottom, "scroll to bottom"),
-        (r"scroll (down|up)", None, "scroll"),
+        (r"page down|scroll down (?:one |a )?page", hotkey_action("space"), "page down"),
+        (r"page up|scroll up (?:one |a )?page", hotkey_action("shift", "space"), "page up"),
+        (r"pin.*tab", hotkey_action("mod", "shift", "p") if IS_MAC else hotkey_action("mod", "shift", "p"), "pin tab"),
+        (r"mute.*tab", hotkey_action("mod", "shift", "m") if IS_MAC else hotkey_action("mod", "shift", "m"), "mute tab"),
+        (r"(open|show).*(bookmark manager|bookmarks manager)", hotkey_action("mod", "option", "b") if IS_MAC else hotkey_action("mod", "shift", "o"), "bookmark manager"),
+        (r"clear.*form|reset.*form", hotkey_action("mod", "shift", "delete") if IS_MAC else hotkey_action("mod", "delete"), "clear form"),
+        (r"focus.*next.*(field|input|box)", hotkey_action("tab"), "next field"),
+        (r"focus.*(previous|prev).*(field|input|box)", hotkey_action("shift", "tab"), "previous field"),
+        (r"submit|press enter|hit enter", hotkey_action("enter"), "press enter"),
+        (r"escape|cancel|close dialog", hotkey_action("escape"), "escape"),
+        (r"open.*link.*new tab", hotkey_action("mod", "enter"), "open link in new tab"),
         (r"bookmark all", hotkey_action("mod", "shift", "d"), "bookmark all tabs"),
         (r"bookmark", hotkey_action("mod", "d"), "bookmark page"),
         (r"(show|hide|toggle).*(bookmark bar|bookmarks bar)", hotkey_action("mod", "shift", "b"), "toggle bookmarks bar"),
@@ -252,7 +318,7 @@ def permission_hints(feature: str) -> str:
             return ("macOS: grant Accessibility, Screen Recording, and Microphone "
                     "for Terminal/your IDE in System Settings → Privacy & Security.")
         if feature == "page_reader":
-            return ("macOS: grant Accessibility (hotkeys/click-to-read) and "
+            return ("macOS: grant Accessibility (hotkeys/hover-to-read) and "
                     "Screen Recording (OCR) in System Settings → Privacy & Security.")
     if IS_WINDOWS:
         if feature == "page_reader":
