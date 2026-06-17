@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accessibility4all Dyslexia Font</title>
+  <style>
+    body {
+      max-width: 720px;
+      margin: 32px auto;
+      padding: 0 20px;
+      font-family: Arial, sans-serif;
+      color: #202124;
+    }
+
+    label {
+      display: block;
+      margin: 18px 0 6px;
+      font-weight: 700;
+    }
+
+    select,
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+      font-size: 16px;
+    }
+
+    .row {
+      display: flex;
+      gap: 14px;
+    }
+
+    .row > div {
+      flex: 1;
+    }
+
+    button {
+      margin-top: 22px;
+      padding: 10px 14px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    #status {
+      margin-left: 10px;
+      color: #137333;
+    }
+  </style>
+</head>
+<body>
+  <h1>Accessibility4all Dyslexia Font</h1>
+
+  <label>
+    <input id="enabled" type="checkbox">
+    Enable website font replacement
+  </label>
+
+  <label for="fontFamily">Font stack</label>
+  <select id="fontFamily">
+    <option value='"OpenDyslexic", "Atkinson Hyperlegible", "Comic Sans MS", Arial, sans-serif'>OpenDyslexic first</option>
+    <option value='"Atkinson Hyperlegible", "OpenDyslexic", "Comic Sans MS", Arial, sans-serif'>Atkinson Hyperlegible first</option>
+    <option value='"Comic Sans MS", "OpenDyslexic", "Atkinson Hyperlegible", Arial, sans-serif'>Comic Sans MS first</option>
+    <option value='Arial, sans-serif'>Arial</option>
+  </select>
+
+  <div class="row">
+    <div>
+      <label for="letterSpacing">Letter spacing</label>
+      <input id="letterSpacing" type="text" value="0.03em">
+    </div>
+    <div>
+      <label for="lineHeight">Line height</label>
+      <input id="lineHeight" type="number" min="1" max="2.5" step="0.05" value="1.55">
+    </div>
+    <div>
+      <label for="fontWeight">Font weight</label>
+      <select id="fontWeight">
+        <option value="inherit">Normal page weight</option>
+        <option value="600">Semi-bold</option>
+        <option value="700">Bold</option>
+      </select>
+    </div>
+  </div>
+
+  <button id="save">Save</button>
+  <span id="status" role="status"></span>
+
+  <script src="options.js"></script>
+</body>
+</html>
