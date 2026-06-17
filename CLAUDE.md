@@ -135,9 +135,14 @@ Hold-to-talk voice commands that control Google Chrome.
      tabs or another row), so it opens the video, never the channel name. Click
      commands ("click/tap/select …") also skip the shortcut table so a title word
      like "reload" can't fire a hotkey.
-   - **Vision fallback**: anything else / no confident title match →
-     screenshot → `pytesseract` OCR → send the **numbered** element list to Groq
-     → it returns the element **index** → we look up the verified coordinate.
+   - **Vision fallback for clicks** (`ask_groq_vision`): when a click can't be
+     matched locally, the **actual screenshot** is sent to a Groq **vision** model
+     (`llama-4-scout`) with a numbered red box drawn over each OCR element; the
+     model SEES the page and returns the box number, and we click that box's
+     verified OCR coordinate (thumbnail offset still applies for videos). This
+     replaces the old text-only guess that often missed.
+   - **Text fallback** (`ask_groq`): non-click commands (scroll/type into a field)
+     send the numbered element **text** list to the text model for an index.
    Each vision step takes a **fresh** screenshot, and the loop **waits** after a
    page-changing step (`_changes_page`) so later clicks see the new screen.
 6. **Execute** — `pyautogui` performs the hotkey / click / scroll / type, or a
@@ -147,10 +152,11 @@ Every run logs each step to the terminal with timings, and appends a JSON line t
 `features/voice_control/trials.jsonl` (`commands`, per-step `method` =
 `"shortcut"`/`"vision"`).
 
-> **Why OCR text instead of sending the raw image to a vision model?** OCR gives
-> the *exact* pixel box of each on-screen word, so clicks land precisely. Vision
-> LLMs are unreliable at predicting precise click coordinates. The screenshot is
-> still "sent to Groq" — just as a numbered element list rather than pixels.
+> **Why click a verified OCR coordinate, not a model-guessed pixel?** Vision LLMs
+> are unreliable at predicting *exact* click pixels. So even when we send the real
+> image (click fallback), we overlay numbered boxes from OCR and have the model
+> pick a box number — then click that box's measured coordinate. The model gets to
+> see the page; the click stays pixel-precise.
 
 ### Two things that are easy to get wrong (don't regress these)
 

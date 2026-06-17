@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 import pyautogui
+from PIL import ImageDraw
 import speech_recognition as sr
 import pytesseract
 import tkinter as tk
@@ -32,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, feature_bus, platform as plat, screen_ocr  # noqa: E402
+from shared import console, feature_bus, platform as plat, screen_ocr, groq_vision  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
@@ -877,6 +878,72 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
     return None        # let Groq handle anything else
 
 
+def _looks_clicky(command: str) -> bool:
+    """Is this a 'click/select an element' command (so we should use vision)?"""
+    return bool(re.search(r"(?i)\b(click|tap|press|select|choose|play|open)\b", command))
+
+
+def ask_groq_vision(client: Groq, command: str, elements: list[dict]) -> dict:
+    """Send the ACTUAL screenshot to a Groq vision model to locate a click.
+
+    We draw a numbered red box over each on-screen text element and ask the model
+    which box to click. The model gets to SEE the page (instead of guessing from
+    OCR text), but we click the verified OCR coordinate of the chosen box — never
+    a pixel the model made up — so it stays precise. For videos we still aim at
+    the thumbnail above the chosen title."""
+    shown = elements[:80]
+    if not shown:
+        raise ValueError("nothing on screen to click")
+
+    img = pyautogui.screenshot().convert("RGB")
+    screen_w, screen_h = pyautogui.size()
+    sx = img.width / screen_w if screen_w else 1.0
+    sy = img.height / screen_h if screen_h else 1.0
+    draw = ImageDraw.Draw(img)
+    for i, e in enumerate(shown):
+        x0, y0 = int(e["x0"] * sx), int(e["y0"] * sy)
+        x1, y1 = int(e["x1"] * sx), int(e["y1"] * sy)
+        draw.rectangle([x0, y0, x1, y1], outline=(255, 0, 0), width=2)
+        draw.text((x0 + 1, max(0, y0 - 13)), str(i), fill=(255, 0, 0))
+    data_url = groq_vision.image_to_data_url(img, max_size=1400)
+
+    prompt = (
+        'This Google Chrome screenshot has red numbered boxes over the clickable '
+        f'text on the page. The user said: "{command}".\n'
+        'Pick the box that best matches what they want to click. Reply with ONLY a '
+        'JSON object {"index": N} where N is the box number, or {"index": -1} if '
+        'nothing on screen matches.'
+    )
+    log("GROQ", f"VISION: sending annotated screenshot ({len(shown)} boxes) to "
+                f"{groq_vision.VISION_MODEL}")
+    with Timer("GROQ", "vision click localization"):
+        response = client.chat.completions.create(
+            model=groq_vision.VISION_MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]}],
+            temperature=0, max_tokens=40, timeout=GROQ_TIMEOUT,
+        )
+    raw = (response.choices[0].message.content or "").strip()
+    log("GROQ", f"vision raw: {raw!r}")
+    mm = re.search(r"-?\d+", raw)
+    idx = int(mm.group()) if mm else -1
+    if not (0 <= idx < len(shown)):
+        raise ValueError(f"couldn't find that on screen (vision returned {idx})")
+
+    el = shown[idx]
+    is_video = bool(re.search(r"\b(video|thumbnail|clip|movie)\b", command, re.I)) \
+        or bool(re.match(r"(?i)\s*play\b", command))
+    if is_video:
+        x, y = _thumbnail_point(el, elements, screen_h)
+        log("GROQ", f"vision picked [{idx}] {el['text'][:50]!r} -> thumbnail ({x}, {y})")
+    else:
+        x, y = screen_ocr.click_point_for_element(el)
+        log("GROQ", f"vision picked [{idx}] {el['text'][:50]!r} at ({x}, {y})")
+    return {"action": "click", "x": x, "y": y}
+
+
 def _paste_text(text: str):
     plat.paste_text(text)
 
@@ -1417,15 +1484,21 @@ class App(tk.Tk):
             self._set_status(f"{label}Looking at the screen…", ACCENT)
             elements = capture_screen_elements()
             ecount = len(elements)
-            # Try matching the spoken title directly first (deterministic);
-            # only ask Groq if no on-screen text matches confidently.
+            # Try matching the spoken title directly first (deterministic).
             local = match_click_target(sub, elements)
             if local is not None:
                 action, method = local, "match"
+            elif _looks_clicky(sub):
+                # Click we couldn't match locally → let the vision model SEE the
+                # screenshot and pick the element (precise OCR coordinate).
+                self._set_status(f"{label}Looking with AI vision…", ACCENT)
+                action = ask_groq_vision(self.groq, sub, elements)
+                method = "vision-image"
             else:
+                # Non-click command (scroll/type/etc.) → text model is fine.
                 self._set_status(f"{label}Asking AI…", ACCENT)
                 action = ask_groq(self.groq, sub, elements)
-                method = "vision"
+                method = "vision-text"
         with Timer("EXECUTE"):
             result = execute_action(action)
         log("EXECUTE", f"result: {result}")
