@@ -23,7 +23,9 @@ def _ensure_tesseract():
 
 def capture_screen_elements(log_fn: LogFn | None = None) -> list[dict]:
     """Screenshot the screen, OCR text, group words into lines, scale coords."""
-    _ensure_tesseract()    def _log(stage: str, msg: str = "", level: str = "INFO"):
+    _ensure_tesseract()
+
+    def _log(stage: str, msg: str = "", level: str = "INFO"):
         if log_fn:
             log_fn(stage, msg, level)
 
