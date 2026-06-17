@@ -9,4 +9,5 @@ hub_state.json
 feature_bus/commands.jsonl
 feature_bus/presence.json
 features/page_reader/settings.json
+features/voice_control/settings.json
 .venv/

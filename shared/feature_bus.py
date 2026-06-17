@@ -16,10 +16,12 @@ PAGE_READER_SETTINGS = ROOT / "features" / "page_reader" / "settings.json"
 
 DEFAULT_PAGE_READER_SETTINGS = {
     "voice_guided": True,
-    "click_to_read": False,
+    "hover_to_read": False,
+    "use_groq_summary": True,
     "hotkeys": {"read_screen": "F9", "stop": "F10"},
-    "tts_rate": 180,
+    "tts_rate": 70,
     "tts_volume": 1.0,
+    "hover_delay_ms": 750,
 }
 
 

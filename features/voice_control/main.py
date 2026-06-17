@@ -35,9 +35,29 @@ if str(ROOT) not in sys.path:
 from shared import console, feature_bus, platform as plat, screen_ocr  # noqa: E402
 
 console.configure_stdio()
+plat.enable_dpi_awareness()
 
 # ── Trial logging ─────────────────────────────────────────────────────────────
 TRIAL_LOG = Path(__file__).parent / "trials.jsonl"
+SETTINGS_FILE = Path(__file__).parent / "settings.json"
+
+
+def default_settings() -> dict:
+    return {"always_on": False}
+
+
+def load_settings() -> dict:
+    s = default_settings()
+    if SETTINGS_FILE.exists():
+        try:
+            s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
+        except Exception as e:
+            log("SETTINGS", f"bad settings.json: {e} — using defaults", "WARN")
+    return s
+
+
+def save_settings(settings: dict):
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
 def _log_trial(entry: dict):
     entry["ts"] = datetime.datetime.now().isoformat()
@@ -140,6 +160,88 @@ class PushToTalkRecorder:
             log("RECORD", f"too short (<{self.MIN_SECONDS}s) — discarding", "WARN")
             return None
         return sr.AudioData(raw, self.SAMPLE_RATE, self.SAMPLE_WIDTH)
+
+
+class AlwaysOnListener:
+    """Continuously listen; end an utterance after a pause in speech."""
+
+    SAMPLE_RATE = PushToTalkRecorder.SAMPLE_RATE
+    SAMPLE_WIDTH = PushToTalkRecorder.SAMPLE_WIDTH
+    CHUNK = PushToTalkRecorder.CHUNK
+    SILENCE_RMS = 700
+    SILENCE_SECS = 1.35
+    MIN_SPEECH_SECS = 0.75
+
+    def __init__(self, on_utterance):
+        self._on_utterance = on_utterance
+        self._frames: list[bytes] = []
+        self._speaking = False
+        self._silence_chunks = 0
+        self._stream = None
+        self._active = False
+        self.level = 0.0
+
+    def start(self):
+        if self._active:
+            return
+        self._frames = []
+        self._speaking = False
+        self._silence_chunks = 0
+        self.level = 0.0
+        self._stream = sd.RawInputStream(
+            samplerate=self.SAMPLE_RATE, channels=1, dtype="int16",
+            blocksize=self.CHUNK, callback=self._cb,
+        )
+        self._stream.start()
+        self._active = True
+        log("RECORD", "always-on listening started")
+
+    def stop(self):
+        if not self._active:
+            return
+        self._active = False
+        if self._stream:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        self._frames = []
+        self._speaking = False
+        self.level = 0.0
+        log("RECORD", "always-on listening stopped")
+
+    def _cb(self, indata, frames, time_info, status):
+        data = bytes(indata)
+        arr = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        self.level = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
+        if not self._active:
+            return
+
+        quiet = self.level < self.SILENCE_RMS
+        if not self._speaking:
+            if not quiet:
+                self._speaking = True
+                self._frames = [data]
+                self._silence_chunks = 0
+            return
+
+        self._frames.append(data)
+        if quiet:
+            self._silence_chunks += 1
+            if (self._silence_chunks * self.CHUNK / self.SAMPLE_RATE) >= self.SILENCE_SECS:
+                self._emit_utterance()
+        else:
+            self._silence_chunks = 0
+
+    def _emit_utterance(self):
+        self._speaking = False
+        self._silence_chunks = 0
+        raw = b"".join(self._frames)
+        self._frames = []
+        min_bytes = int(self.SAMPLE_RATE * self.SAMPLE_WIDTH * self.MIN_SPEECH_SECS)
+        if len(raw) < min_bytes:
+            return
+        audio = sr.AudioData(raw, self.SAMPLE_RATE, self.SAMPLE_WIDTH)
+        self._on_utterance(audio)
 
 
 def transcribe(audio: sr.AudioData) -> str:
@@ -268,14 +370,51 @@ def match_shortcut(command: str) -> tuple[dict | None, str | None]:
     if typed is not None:
         return typed, typed_desc
 
+    scrolled, scroll_desc = _match_scroll(command)
+    if scrolled is not None:
+        return scrolled, scroll_desc
+
     text = command.lower().strip()
     for pattern, action, desc in _COMPILED_SHORTCUTS:
         if pattern.search(text):
-            if action is None:                       # the generic scroll entry
-                direction = "up" if "up" in text else "down"
-                return _scroll(direction), f"scroll {direction}"
-            return dict(action), desc                # copy so callers can't mutate the table
+            return dict(action), desc
     return None, None
+
+
+def _match_scroll(command: str) -> tuple[dict | None, str | None]:
+    """Map spoken scroll amounts to wheel clicks (bit / normal / lot)."""
+    text = command.lower().strip()
+    if "scroll" not in text and "page" not in text:
+        return None, None
+
+    m = re.search(
+        r"scroll\s+(?:the\s+page\s+)?(?P<dir>down|up|left|right)"
+        r"(?:\s+(?P<amt>a\s+lot|a\s+little|a\s+bit|slightly|more|much))?",
+        text,
+    )
+    if not m:
+        m = re.search(
+            r"scroll\s+(?P<amt>a\s+lot|a\s+little|a\s+bit|slightly|more|much)\s+"
+            r"(?P<dir>down|up|left|right)",
+            text,
+        )
+    if not m:
+        m = re.search(r"scroll\s+(?P<dir>down|up|left|right)\b", text)
+    if not m:
+        return None, None
+
+    direction = m.group("dir")
+    amt = (m.groupdict().get("amt") or "").strip()
+    if amt in ("a lot", "much", "more"):
+        amount = 18
+    elif amt in ("a little", "a bit", "slightly"):
+        amount = 3
+    else:
+        amount = 8
+    label = f"scroll {direction}"
+    if amt:
+        label += f" ({amt})"
+    return _scroll(direction, amount), label
 
 
 # ── Stacking multiple commands in one utterance ───────────────────────────────
@@ -287,7 +426,7 @@ def match_shortcut(command: str) -> tuple[dict | None, str | None]:
 _VERB = (r"(?:open|go|navigate|visit|head|take|bring|click|tap|press|select|search|"
          r"google|look|type|enter|write|input|paste|put|scroll|close|reopen|"
          r"bookmark|reload|refresh|zoom|copy|cut|undo|redo|find|play|pause|mute|"
-         r"minimi[sz]e|quit|download|switch|hit)")
+         r"minimi[sz]e|quit|download|switch|hit|watch|start)")
 
 def split_commands(command: str) -> list[str]:
     text = command.strip()
@@ -299,7 +438,48 @@ def split_commands(command: str) -> list[str]:
     for p in parts:
         for piece in re.split(r"\s+and\s+(?=" + _VERB + r"\b)", p, flags=re.I):
             out.extend(re.split(r"\s*,\s*(?=" + _VERB + r"\b)", piece, flags=re.I))
-    return [s.strip().rstrip(".,") for s in out if s.strip()]
+    cleaned = []
+    for s in out:
+        s = s.strip().rstrip(".,")
+        if s.lower().startswith("and "):
+            s = s[4:].strip()
+        if s:
+            cleaned.append(s)
+    return _split_compound_phrases(cleaned)
+
+
+def _split_compound_phrases(commands: list[str]) -> list[str]:
+    """Split glued steps like 'open a new tab search one piece'."""
+    out: list[str] = []
+    for s in commands:
+        m = re.match(
+            r"(?i)^(.+?\bnew tab\b)\s+(search\b.+|go to\b.+|navigate\b.+|open\b.+|type\b.+)$",
+            s,
+        )
+        if m:
+            out.extend([m.group(1).strip(), m.group(2).strip()])
+            continue
+        out.append(s)
+    return out
+
+
+def _should_process_command(command: str) -> bool:
+    """Ignore filler / too-short always-on misfires."""
+    c = command.strip().strip(".,")
+    if len(c) < 5:
+        return False
+    words = c.lower().split()
+    if len(words) == 1 and words[0] in {
+        "hey", "hi", "hello", "yeah", "yes", "no", "ok", "okay",
+        "um", "uh", "hmm", "wait", "stop", "thanks",
+    }:
+        return False
+    if re.match(
+        r"^(yeah you can|this is one day|i'll just add|that would be wait)\b",
+        c, re.I,
+    ):
+        return False
+    return True
 
 
 def _changes_page(action: dict) -> bool:
@@ -360,8 +540,10 @@ def try_forward_to_page_reader(command: str) -> tuple[bool, str | None]:
 
 # ── Core pipeline functions ───────────────────────────────────────────────────
 def capture_screen_elements() -> list[dict]:
-    with Timer("SCREENSHOT", "delegating to shared OCR"):
-        return screen_ocr.capture_screen_elements(log_fn=log)
+    """OCR the front Chrome window only (not the whole desktop)."""
+    plat.enable_dpi_awareness()
+    with Timer("SCREENSHOT", "Chrome OCR"):
+        return screen_ocr.capture_chrome_elements(log_fn=log)
 
 
 MAX_ELEMENTS = 120          # how many OCR line-elements we show the model
@@ -419,9 +601,10 @@ def _resolve_click_index(action: dict, shown: list[dict]) -> dict:
                 f"(model returned index {idx!r}, valid range 0..{len(shown) - 1})"
             )
         el = shown[idx]
+        cx, cy = screen_ocr.click_point_for_element(el)
         log("GROQ", f"click resolved -> element [{idx}] {el['text']!r} "
-                    f"at ({el['x']}, {el['y']})")
-        return {"action": "click", "x": el["x"], "y": el["y"]}
+                    f"at ({cx}, {cy})")
+        return {"action": "click", "x": cx, "y": cy}
     # Legacy/fallback: model returned raw x/y. Snap to the nearest shown element
     # so a slightly-off guess still lands on real text instead of empty space.
     if "x" in action and "y" in action and shown:
@@ -429,9 +612,10 @@ def _resolve_click_index(action: dict, shown: list[dict]) -> dict:
         nearest = min(shown, key=lambda e: (e["x"] - ax) ** 2 + (e["y"] - ay) ** 2)
         dist = ((nearest["x"] - ax) ** 2 + (nearest["y"] - ay) ** 2) ** 0.5
         if dist <= 60:        # within ~60px of a real element — snap to it
+            cx, cy = screen_ocr.click_point_for_element(nearest)
             log("GROQ", f"raw click ({ax}, {ay}) snapped to {nearest['text']!r} "
-                        f"at ({nearest['x']}, {nearest['y']})")
-            return {"action": "click", "x": nearest["x"], "y": nearest["y"]}
+                        f"at ({cx}, {cy})")
+            return {"action": "click", "x": cx, "y": cy}
         log("GROQ", f"raw click ({ax}, {ay}) has no nearby element "
                     f"(closest {dist:.0f}px away) — using as-is", "WARN")
     return action
@@ -451,6 +635,12 @@ _STOP_MATCH = {
 }
 _ORDINALS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh",
              "eighth", "ninth", "tenth", "last", "next", "previous", "top", "bottom"}
+_ORDINAL_MAP = {
+    "first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
+    "fourth": 3, "4th": 3, "fifth": 4, "5th": 4, "sixth": 5, "6th": 5,
+    "seventh": 6, "7th": 6, "eighth": 7, "8th": 7, "ninth": 8, "9th": 8,
+    "tenth": 9, "10th": 9,
+}
 
 def _norm_text(s: str) -> str:
     s = re.sub(r"[^\w\s]", " ", s.lower())
@@ -510,11 +700,67 @@ def _thumbnail_point(title: dict, elements: list[dict], screen_h: int) -> tuple[
 def _first_video_title(elements: list[dict], screen_w: int, screen_h: int) -> dict | None:
     """Heuristic for a generic 'click a video': the topmost content-area line
     that looks like a video title (longish, multi-word, not sidebar/top bar)."""
-    cands = [e for e in elements
-             if len(e["text"]) >= 15 and len(e["text"].split()) >= 3
-             and e["y"] > 0.08 * screen_h and e["x"] > 0.12 * screen_w]
-    cands.sort(key=lambda e: (e["y"], e["x"]))
+    cands = _clickable_candidates(elements, screen_w, screen_h, video_only=True)
     return cands[0] if cands else None
+
+
+def _ordinal_index(command: str) -> int | None:
+    m = re.search(
+        r"\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|sixth|6th|"
+        r"seventh|7th|eighth|8th|ninth|9th|tenth|10th|last)\b",
+        command, re.I,
+    )
+    if not m:
+        return None
+    word = m.group(1).lower()
+    if word == "last":
+        return -1
+    return _ORDINAL_MAP.get(word)
+
+
+def _clickable_candidates(elements: list[dict], screen_w: int, screen_h: int,
+                          *, video_only: bool = False) -> list[dict]:
+    cands = []
+    for e in elements:
+        text = e.get("text", "")
+        if len(text) < 3:
+            continue
+        if e["y"] < screen_h * 0.07:
+            continue
+        if e["x"] < screen_w * 0.07 and len(text) < 18:
+            continue
+        if video_only:
+            if len(text) < 10 or len(text.split()) < 2:
+                continue
+        cands.append(e)
+    cands.sort(key=lambda e: (e["y0"], e["x0"]))
+    return cands
+
+
+def _match_tab_label(command: str, elements: list[dict]) -> dict | None:
+    """Click Google result tabs like Images, Videos, News."""
+    if not re.search(r"\b(click|go|open|switch|tap|press)\b", command, re.I):
+        return None
+    want = None
+    if re.search(r"\b(images?|photos?)\b", command, re.I):
+        want = ("image", "images")
+    elif re.search(r"\bvideos?\b", command, re.I):
+        want = ("video", "videos")
+    elif re.search(r"\bnews\b", command, re.I):
+        want = ("news",)
+    elif re.search(r"\bshopping\b", command, re.I):
+        want = ("shopping",)
+    if not want:
+        return None
+    for e in elements:
+        et = _norm_text(e["text"])
+        if not et:
+            continue
+        if any(w in et.split() or et == w for w in want):
+            x, y = screen_ocr.click_point_for_element(e)
+            log("MATCH", f"tab label {et!r} at ({x}, {y})")
+            return {"action": "click", "x": x, "y": y}
+    return None
 
 
 def match_click_target(command: str, elements: list[dict]) -> dict | None:
@@ -526,6 +772,27 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
     is_video = bool(re.search(r"\b(video|thumbnail|clip|movie)\b", command, re.I)) \
         or bool(re.match(r"(?i)\s*play\b", command))
     screen_w, screen_h = pyautogui.size()
+
+    tab = _match_tab_label(command, elements)
+    if tab is not None:
+        return tab
+
+    oidx = _ordinal_index(command)
+    if oidx is not None and re.search(r"\b(click|tap|press|select|open|play)\b", command, re.I):
+        video_mode = is_video or bool(
+            re.search(r"\b(video|result|thumbnail|link|item|title)\b", command, re.I))
+        cands = _clickable_candidates(elements, screen_w, screen_h, video_only=video_mode)
+        if not cands:
+            cands = _clickable_candidates(elements, screen_w, screen_h, video_only=False)
+        if cands:
+            pick = cands[oidx] if oidx >= 0 else cands[-1]
+            if video_mode or is_video:
+                x, y = _thumbnail_point(pick, elements, screen_h)
+            else:
+                x, y = screen_ocr.click_point_for_element(pick)
+            which = "last" if oidx < 0 else f"#{oidx + 1}"
+            log("MATCH", f"ordinal {which} -> {pick['text'][:50]!r} at ({x}, {y})")
+            return {"action": "click", "x": x, "y": y}
 
     target = _extract_click_target(command)
     words = []
@@ -554,7 +821,7 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
                 log("MATCH", f"title match {best_score:.2f}: {best['text'][:50]!r} "
                              f"-> clicking thumbnail at ({x}, {y})")
             else:
-                x, y = best["x"], best["y"]
+                x, y = screen_ocr.click_point_for_element(best)
                 log("MATCH", f"text match {best_score:.2f}: {best['text'][:50]!r} "
                              f"at ({x}, {y})")
             return {"action": "click", "x": x, "y": y}
@@ -627,7 +894,9 @@ BG = "#1a1a2e"; CARD = "#262642"; TEXT = "#e8e8ff"; MUTED = "#8a8ab0"
 ACCENT = "#5b8cff"; REC = "#ff5a5f"; OK = "#4ade80"; WARN = "#ffb86b"
 IDLE_DOT = "#3a3a55"
 IDLE_MSG = "Ready"
+ALWAYS_ON_MSG = "Always on — speak a command"
 METER_W, METER_H = 268, 6
+WIN_W, WIN_H = 300, 176
 TALK_KEYCODE = 50          # macOS keycode for the ` / ~ key (kVK_ANSI_Grave)
 
 
@@ -638,12 +907,16 @@ class App(tk.Tk):
         if not api_key:
             raise RuntimeError("GROQ_API_KEY not found in environment / .env file")
         self.groq = Groq(api_key=api_key, timeout=GROQ_TIMEOUT, max_retries=1)
+        self.settings = load_settings()
         self._recorder = PushToTalkRecorder()
+        self._always_listener: AlwaysOnListener | None = None
+        self._always_on = bool(self.settings.get("always_on", False))
         self._recording = False
         self._busy = False        # True while transcribing / acting on a command
         self._reset_after = None  # pending "reset to idle" timer id
         self._key_q: queue.Queue = queue.Queue()
         self._grave_down = False
+        self._pending_audio: sr.AudioData | None = None
         self._build_ui()
         self._reset_idle()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -651,8 +924,11 @@ class App(tk.Tk):
         if hint:
             log("STARTUP", hint)
         self._start_key_listener()
+        if self._always_on:
+            self.after(200, self._start_always_on)
 
     def _on_close(self):
+        self._stop_always_on()
         feature_bus.remove_presence("voice_control")
         self.destroy()
 
@@ -696,13 +972,25 @@ class App(tk.Tk):
         tk.Label(self, textvariable=self._trial_var,
                  font=tkfont.Font(family="Helvetica", size=9),
                  fg="#5a5a78", bg=BG, anchor="w").pack(fill="x", padx=16, pady=(4, 0))
-        tk.Label(self, text="hold   `   to talk",
+
+        toggles = tk.Frame(self, bg=BG)
+        toggles.pack(fill="x", padx=16, pady=(2, 0))
+        self._always_on_var = tk.BooleanVar(value=self._always_on)
+        tk.Checkbutton(
+            toggles, text="Always on (listen without holding `)",
+            variable=self._always_on_var, command=self._on_always_on_toggle,
+            font=tkfont.Font(family="Helvetica", size=9),
+            fg=TEXT, bg=BG, selectcolor=CARD, activebackground=BG,
+            activeforeground=TEXT,
+        ).pack(anchor="w")
+
+        self._hint_var = tk.StringVar(value="hold   `   to talk")
+        tk.Label(self, textvariable=self._hint_var,
                  font=tkfont.Font(family="Helvetica", size=9),
                  fg="#5a5a78", bg=BG, anchor="w").pack(fill="x", padx=16, pady=(0, 8))
 
-        w, h = 300, 152
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 80}")
+        self.geometry(f"{WIN_W}x{WIN_H}+{sw - WIN_W - 24}+{sh - WIN_H - 80}")
         self.lift()
         self.bind("<Configure>", lambda e: self.after(100, self._update_presence))
         self.after(100, self._update_presence)
@@ -711,8 +999,53 @@ class App(tk.Tk):
         feature_bus.update_presence(
             "voice_control",
             os.getpid(),
-            {"x": self.winfo_x(), "y": self.winfo_y(), "w": 300, "h": 152},
+            {"x": self.winfo_x(), "y": self.winfo_y(), "w": WIN_W, "h": WIN_H},
         )
+
+    def _on_always_on_toggle(self):
+        self._always_on = self._always_on_var.get()
+        self.settings["always_on"] = self._always_on
+        save_settings(self.settings)
+        if self._always_on:
+            self._start_always_on()
+            self._hint_var.set("always on — pause after you speak")
+        else:
+            self._stop_always_on()
+            self._hint_var.set("hold   `   to talk")
+            if not self._busy and not self._recording:
+                self._reset_idle()
+
+    def _start_always_on(self):
+        if self._always_listener is None:
+            self._always_listener = AlwaysOnListener(self._on_always_utterance)
+        try:
+            self._always_listener.start()
+        except Exception as e:
+            log("RECORD", f"always-on mic failed: {e}", "ERROR")
+            self._always_on_var.set(False)
+            self._always_on = False
+            self.settings["always_on"] = False
+            save_settings(self.settings)
+            self._set_status(f"Mic error: {e}", REC)
+            return
+        self._set_indicator("idle")
+        if not self._busy:
+            self._set_status(ALWAYS_ON_MSG, OK)
+        self._poll_always_on_meter()
+
+    def _stop_always_on(self):
+        if self._always_listener:
+            self._always_listener.stop()
+
+    def _on_always_utterance(self, audio: sr.AudioData):
+        self.after(0, lambda: self._submit_audio(audio, source="always-on"))
+
+    def _poll_always_on_meter(self):
+        if not self._always_on or not self._always_listener:
+            return
+        if not self._recording and not self._busy:
+            self._draw_meter(self._always_listener.level)
+        self.after(30, self._poll_always_on_meter)
 
     # ── meter (polled on the main thread; never updated from audio thread) ──
     def _draw_meter(self, energy: float):
@@ -840,6 +1173,8 @@ class App(tk.Tk):
         if self._reset_after:                       # cancel a pending idle reset
             self.after_cancel(self._reset_after)
             self._reset_after = None
+        if self._always_on:
+            self._stop_always_on()
         log("UI", "talk started — recording")
         try:
             self._recorder.start()
@@ -862,13 +1197,32 @@ class App(tk.Tk):
         if audio is None:
             self._set_indicator("idle")
             self._set_status("Too short — hold ` a moment longer", WARN)
+            if self._always_on:
+                self._start_always_on()
             self._schedule_reset()
+            return
+        self._submit_audio(audio, source="push-to-talk")
+
+    def _submit_audio(self, audio: sr.AudioData, source: str = "mic"):
+        if self._busy:
+            if "always-on" in source:
+                self._pending_audio = audio
+                log("PIPELINE", "queued utterance — will run when current command finishes", "WARN")
+            else:
+                log("PIPELINE", f"ignored {source} utterance — still processing", "WARN")
             return
         self._busy = True
         self._set_indicator("busy")
         self._set_status("Processing…", ACCENT)
-        log("PIPELINE", "=== launching processing thread ===")
+        log("PIPELINE", f"=== launching processing thread ({source}) ===")
         threading.Thread(target=self._process, args=(audio,), daemon=True).start()
+
+    def _run_pending_audio(self):
+        if self._busy or self._pending_audio is None:
+            return
+        audio = self._pending_audio
+        self._pending_audio = None
+        self._submit_audio(audio, source="always-on-queued")
 
     # ── reset back to idle once a command finishes ──
     def _schedule_reset(self, delay_ms: int = 2500):
@@ -881,8 +1235,8 @@ class App(tk.Tk):
         if self._busy or self._recording:
             return
         self._set_indicator("idle")
-        self.status_var.set(IDLE_MSG)
-        self.status_label.configure(fg=MUTED)
+        self.status_var.set(ALWAYS_ON_MSG if self._always_on else IDLE_MSG)
+        self.status_label.configure(fg=OK if self._always_on else MUTED)
         self._trial_var.set("")
         self._draw_meter(0)
 
@@ -917,6 +1271,15 @@ class App(tk.Tk):
             trial["command"] = command
             self._set_status(f'Heard: "{command}"', ACCENT)
 
+            if not _should_process_command(command):
+                log("PIPELINE", f"ignored non-command speech: {command!r}", "WARN")
+                self._set_status("Didn't catch a command — try again", WARN)
+                trial["ignored"] = True
+                trial["success"] = False
+                _log_trial(trial)
+                self._schedule_reset()
+                return
+
             handled, err = try_forward_to_page_reader(command)
             if handled:
                 if err:
@@ -947,7 +1310,10 @@ class App(tk.Tk):
                 if i:
                     # Let the previous step settle — longer if it loaded a page,
                     # so a following "click" sees the new screen.
-                    wait = 2.5 if steps[-1]["changed_page"] else 0.7
+                    prev = steps[-1]
+                    wait = 3.5 if prev["changed_page"] else 0.8
+                    if prev.get("method") == "shortcut" and "search" in prev.get("command", "").lower():
+                        wait = max(wait, 3.0)
                     log("PIPELINE", f"waiting {wait:.1f}s for previous step to settle")
                     time.sleep(wait)
 
@@ -989,6 +1355,9 @@ class App(tk.Tk):
             log("PIPELINE", f"=== finished in {total:.2f}s ===")
             self._busy = False
             self._set_indicator("done" if trial.get("success") else "idle")
+            if self._always_on:
+                self.after(0, self._start_always_on)
+            self.after(300, self._run_pending_audio)
             self.after(0, self._schedule_reset)     # reset to idle shortly after
 
     def _run_subcommand(self, sub: str, label: str = "") -> dict:

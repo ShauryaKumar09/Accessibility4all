@@ -27,9 +27,10 @@ ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, feature_bus, platform as plat, screen_ocr  # noqa: E402
+from shared import console, feature_bus, groq_vision, platform as plat, screen_ocr  # noqa: E402
 
 console.configure_stdio()
+plat.enable_dpi_awareness()
 load_dotenv()
 
 SETTINGS_FILE = FEATURE_DIR / "settings.json"
@@ -55,8 +56,8 @@ OK = "#69db7c"
 WARN = "#ffd166"
 REC = "#ff6b6b"
 
-WIN_W, WIN_H = 300, 220
-VC_W, VC_H = 300, 152
+WIN_W, WIN_H = 300, 248
+VC_W, VC_H = 300, 176
 MARGIN = 12
 
 
@@ -75,6 +76,10 @@ def load_settings() -> dict:
             loaded = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             s.update(loaded)
             s["hotkeys"] = {**default_settings()["hotkeys"], **loaded.get("hotkeys", {})}
+            if "hover_to_read" not in loaded and loaded.get("click_to_read"):
+                s["hover_to_read"] = True
+            if loaded.get("tts_rate", 70) >= 85:
+                s["tts_rate"] = 70
         except Exception as e:
             log(f"bad settings.json: {e} — using defaults")
     return s
@@ -149,6 +154,16 @@ class Speaker:
         self._engine = pyttsx3.init()
         self._engine.setProperty("rate", self._rate)
         self._engine.setProperty("volume", self._volume)
+        try:
+            voices = self._engine.getProperty("voices") or []
+            for voice in voices:
+                name = (voice.name or "").lower()
+                vid = (voice.id or "").lower()
+                if any(tag in name or tag in vid for tag in ("zira", "david", "samantha", "karen")):
+                    self._engine.setProperty("voice", voice.id)
+                    break
+        except Exception:
+            pass
         while True:
             item = self._q.get()
             if item is self._STOP:
@@ -190,14 +205,17 @@ class PageReaderApp(tk.Tk):
         self._last_region_ts = 0.0
         self._bus_offset = 0
         self._hotkey_listener = None
-        self._click_listener = None
+        self._hover_listener = None
+        self._hover_after_id = None
+        self._pending_hover: tuple[int, int] | None = None
+        self._last_hover_text = ""
         self._capture_listener = None
         self._capture_target: str | None = None
         self._modifiers: set = set()
         self._groq: Groq | None = None
 
         self._speaker = Speaker(
-            rate=int(self.settings.get("tts_rate", 180)),
+            rate=int(self.settings.get("tts_rate", 70)),
             volume=float(self.settings.get("tts_volume", 1.0)),
         )
 
@@ -206,7 +224,7 @@ class PageReaderApp(tk.Tk):
         self._position_window()
         self._update_presence()
         self._register_hotkeys()
-        self._update_click_listener()
+        self._update_hover_listener()
         self._start_bus_listener()
 
         self.bind("<Configure>", self._on_configure)
@@ -241,9 +259,16 @@ class PageReaderApp(tk.Tk):
                        fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
                        activeforeground=FG).pack(anchor="w")
 
-        self._click_var = tk.BooleanVar(value=self.settings.get("click_to_read", False))
-        tk.Checkbutton(toggles, text="Click-to-read",
-                       variable=self._click_var, command=self._on_toggle_change,
+        self._hover_var = tk.BooleanVar(value=self.settings.get("hover_to_read", False))
+        tk.Checkbutton(toggles, text="Hover-to-read (pause over text)",
+                       variable=self._hover_var, command=self._on_toggle_change,
+                       font=tkfont.Font(family="Helvetica", size=9),
+                       fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
+                       activeforeground=FG).pack(anchor="w")
+
+        self._groq_var = tk.BooleanVar(value=self.settings.get("use_groq_summary", True))
+        tk.Checkbutton(toggles, text="Groq summary (important content only)",
+                       variable=self._groq_var, command=self._on_toggle_change,
                        font=tkfont.Font(family="Helvetica", size=9),
                        fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
                        activeforeground=FG).pack(anchor="w")
@@ -253,7 +278,7 @@ class PageReaderApp(tk.Tk):
 
         self._read_hk_var = tk.StringVar(value=self.settings["hotkeys"]["read_screen"])
         self._stop_hk_var = tk.StringVar(value=self.settings["hotkeys"]["stop"])
-        self._add_hotkey_row(hk_frame, "Read screen:", self._read_hk_var, "read_screen")
+        self._add_hotkey_row(hk_frame, "Read Chrome:", self._read_hk_var, "read_screen")
         self._add_hotkey_row(hk_frame, "Stop:", self._stop_hk_var, "stop")
 
         self.status_var = tk.StringVar(value="Idle")
@@ -316,9 +341,10 @@ class PageReaderApp(tk.Tk):
 
     def _on_toggle_change(self):
         self.settings["voice_guided"] = self._voice_var.get()
-        self.settings["click_to_read"] = self._click_var.get()
+        self.settings["hover_to_read"] = self._hover_var.get()
+        self.settings["use_groq_summary"] = self._groq_var.get()
         save_settings(self.settings)
-        self._update_click_listener()
+        self._update_hover_listener()
 
     def _save_hotkeys(self):
         self.settings["hotkeys"]["read_screen"] = self._read_hk_var.get()
@@ -387,20 +413,41 @@ class PageReaderApp(tk.Tk):
         self._set_status(f"Hotkey set: {combo}", OK)
         self._capture_target = None
 
-    def _update_click_listener(self):
-        if self._click_listener:
-            self._click_listener.stop()
-            self._click_listener = None
-        if not self.settings.get("click_to_read"):
+    def _ocr_log(self, stage: str, msg: str, _level: str = "INFO"):
+        log(f"{stage} {msg}")
+
+    def _update_hover_listener(self):
+        if self._hover_listener:
+            self._hover_listener.stop()
+            self._hover_listener = None
+        if self._hover_after_id:
+            self.after_cancel(self._hover_after_id)
+            self._hover_after_id = None
+        self._pending_hover = None
+        if not self.settings.get("hover_to_read"):
             return
 
-        def on_click(x, y, button, pressed):
-            if pressed and button == mouse.Button.left:
-                self.after(0, lambda: self.cmd_click_read(int(x), int(y)))
+        def on_move(x, y):
+            self.after(0, lambda: self._schedule_hover_read(int(x), int(y)))
 
-        self._click_listener = mouse.Listener(on_click=on_click)
-        self._click_listener.start()
-        log("click-to-read enabled")
+        self._hover_listener = mouse.Listener(on_move=on_move)
+        self._hover_listener.start()
+        log("hover-to-read enabled")
+
+    def _schedule_hover_read(self, x: int, y: int):
+        self._pending_hover = (x, y)
+        if self._hover_after_id:
+            self.after_cancel(self._hover_after_id)
+        delay = int(self.settings.get("hover_delay_ms", 500))
+        self._hover_after_id = self.after(delay, self._trigger_hover_read)
+
+    def _trigger_hover_read(self):
+        self._hover_after_id = None
+        if not self._pending_hover:
+            return
+        x, y = self._pending_hover
+        self._pending_hover = None
+        threading.Thread(target=self._do_hover_read, args=(x, y), daemon=True).start()
 
     def _start_bus_listener(self):
         def _poll():
@@ -440,23 +487,50 @@ class PageReaderApp(tk.Tk):
         self._last_region_ts = time.time()
 
     def cmd_read_screen(self):
-        self._set_status("Scanning screen…", ACCENT)
+        self._set_status("Scanning Chrome…", ACCENT)
         threading.Thread(target=self._do_read_screen, daemon=True).start()
 
     def _do_read_screen(self):
         try:
-            elements = screen_ocr.capture_screen_elements(log_fn=lambda s, m, l="INFO": log(f"{s} {m}"))
-            lines = screen_ocr.all_reading_order(elements)
-            if not lines:
-                self._set_status("No text found on screen", WARN)
-                return
-            self._remember_region(elements)
-            self._set_status("Reading…", ACCENT)
-            self._speaker.speak_lines(lines)
-            self._set_status(f"Read {len(lines)} lines", OK)
+            if self.settings.get("use_groq_summary", True):
+                try:
+                    self._do_read_screen_groq()
+                    return
+                except Exception as e:
+                    log(f"Groq summary failed, falling back to OCR: {e}")
+            self._do_read_screen_ocr()
         except Exception as e:
             log(f"read_screen failed: {e}")
             self._set_status(f"Error: {e}", REC)
+
+    def _do_read_screen_groq(self):
+        key = os.getenv("GROQ_API_KEY")
+        if not key:
+            raise RuntimeError("GROQ_API_KEY required for Groq page summary")
+        self._set_status("Analyzing Chrome with AI…", ACCENT)
+        img = screen_ocr.capture_chrome_screenshot()
+        client = self._groq_client()
+        script = groq_vision.summarize_page_image(client, img)
+        lines = groq_vision.script_to_lines(script)
+        if not lines:
+            self._set_status("Nothing important found in Chrome", WARN)
+            return
+        self._last_region = {"texts": lines, "x0": 0, "y0": 0, "x1": 0, "y1": 0}
+        self._last_region_ts = time.time()
+        self._set_status("Reading summary…", ACCENT)
+        self._speaker.speak_lines(lines)
+        self._set_status(f"Read {len(lines)} summary part(s)", OK)
+
+    def _do_read_screen_ocr(self):
+        elements = screen_ocr.capture_chrome_elements(log_fn=self._ocr_log)
+        lines = screen_ocr.all_reading_order(elements)
+        if not lines:
+            self._set_status("No text found in Chrome", WARN)
+            return
+        self._remember_region(elements)
+        self._set_status("Reading Chrome…", ACCENT)
+        self._speaker.speak_lines(lines)
+        self._set_status(f"Read {len(lines)} lines from Chrome", OK)
 
     def cmd_stop(self):
         self._speaker.stop()
@@ -477,8 +551,7 @@ class PageReaderApp(tk.Tk):
     def _do_read_last_refresh(self):
         try:
             region = self._last_region
-            elements = screen_ocr.capture_screen_elements(
-                log_fn=lambda s, m, l="INFO": log(f"{s} {m}"))
+            elements = screen_ocr.capture_chrome_elements(log_fn=self._ocr_log)
             matched = screen_ocr.elements_in_region(
                 elements, region["x0"], region["y0"], region["x1"], region["y1"])
             texts = [e["text"] for e in matched] if matched else region["texts"]
@@ -492,21 +565,23 @@ class PageReaderApp(tk.Tk):
         except Exception as e:
             self._set_status(f"Error: {e}", REC)
 
-    def cmd_click_read(self, x: int, y: int):
-        self._set_status("Reading click…", ACCENT)
-        threading.Thread(target=self._do_click_read, args=(x, y), daemon=True).start()
-
-    def _do_click_read(self, x: int, y: int):
+    def _do_hover_read(self, x: int, y: int):
         try:
+            region = screen_ocr.region_around_point(x, y, pad_w=720, pad_h=280)
             elements = screen_ocr.capture_screen_elements(
-                log_fn=lambda s, m, l="INFO": log(f"{s} {m}"))
+                log_fn=self._ocr_log, region=region)
             el = screen_ocr.elements_at_point(elements, x, y)
             if not el:
-                self._set_status("No text at click", WARN)
                 return
+            text = el["text"].strip()
+            if not text or text == self._last_hover_text:
+                return
+            self._last_hover_text = text
             self._remember_region([el])
-            self._speaker.speak_lines([el["text"]])
-            self._set_status(f"Read: {el['text'][:40]}", OK)
+            self._speaker.stop()
+            self._speaker.speak_lines([text])
+            preview = text if len(text) <= 48 else text[:45] + "…"
+            self._set_status(f"Hover: {preview}", OK)
         except Exception as e:
             self._set_status(f"Error: {e}", REC)
 
@@ -519,8 +594,7 @@ class PageReaderApp(tk.Tk):
 
     def _do_read_section(self, query: str):
         try:
-            elements = screen_ocr.capture_screen_elements(
-                log_fn=lambda s, m, l="INFO": log(f"{s} {m}"))
+            elements = screen_ocr.capture_chrome_elements(log_fn=self._ocr_log)
             shown = elements[:MAX_ELEMENTS]
             if not shown:
                 self._set_status("No text on screen", WARN)
@@ -566,8 +640,8 @@ class PageReaderApp(tk.Tk):
         self._speaker.shutdown()
         if self._hotkey_listener:
             self._hotkey_listener.stop()
-        if self._click_listener:
-            self._click_listener.stop()
+        if self._hover_listener:
+            self._hover_listener.stop()
         if self._capture_listener:
             self._capture_listener.stop()
         feature_bus.remove_presence("page_reader")
