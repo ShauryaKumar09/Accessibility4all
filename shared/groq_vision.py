@@ -10,6 +10,12 @@ from groq import Groq
 from PIL import Image
 
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Click localization is now the PRIMARY vision path for voice control. Llama-4
+# Maverick is the stronger localizer, but it is NOT enabled on this Groq account
+# (Scout is the only vision model available), so we use Scout here too. If/when
+# Maverick is enabled, set this to "meta-llama/llama-4-maverick-17b-128e-instruct"
+# and ask_groq_vision will prefer it and fall back to Scout automatically.
+VISION_CLICK_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TIMEOUT = 45
 
 PAGE_SUMMARY_PROMPT = """You are a screen reader for a blind user looking at Google Chrome.

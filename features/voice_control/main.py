@@ -318,13 +318,36 @@ def _strip_target(text: str) -> tuple[str, str | None]:
 def _match_typing(command: str) -> tuple[dict | None, str | None]:
     cmd = command.strip()
 
-    # 1) Web search:  "search for X" / "search X" / "google X" / "look up X"
-    m = re.match(r"(?i)^\s*(?:search\s+for|search|google|look\s*up|bing)\s+(.+)$", cmd)
+    # 1) Search.  Context-aware: a bare "search X" / "search up X" / "look up X"
+    #    searches the CURRENT page's own search box (resolved against the screen
+    #    later, with a Google fallback when no box exists) so the user stays on
+    #    the site, e.g. typing into Amazon's bar instead of the address bar.
+    #    Saying "google X" / "search the web for X" / "... in the address bar"
+    #    forces a Google search in the omnibox instead.
+    m = re.match(r"(?i)^\s*(search\s+up\s+for|search\s+up|search\s+for|search|"
+                 r"google|look\s*up|bing)\s+(.+)$", cmd)
     if m:
-        payload, _ = _strip_target(m.group(1))
+        verb, rest = m.group(1).lower(), m.group(2).strip()
+        payload, target = _strip_target(rest)
+        web_phrase = re.search(r"(?i)\b(the web|the internet|online)\b", payload)
+        on_engine = re.search(r"(?i)\b(?:on|in|using)\s+(?:google|bing)\b", payload)
+        if web_phrase or on_engine:
+            # drop the "the web for …" / "… on google" qualifier from the query
+            payload = re.sub(
+                r"(?i)^\s*(?:on|in|using)?\s*(?:the web|the internet|online)\s+(?:for\s+)?",
+                "", payload)
+            payload = re.sub(
+                r"(?i)\s+(?:on|in|using)\s+(?:google|bing|the web|the internet|online)\s*$",
+                "", payload).strip()
+        force_web = bool(
+            web_phrase or on_engine or verb in ("google", "bing")
+            or (target and re.search(r"address|url|location|omnibox", target)))
         if payload.strip().lower() not in _NON_PAYLOAD:
-            return (_seq(plat.hotkey_action("mod", "l"), _type(payload, enter=True)),
-                    f"search the web for {payload!r}")
+            if force_web:
+                return (_seq(plat.hotkey_action("mod", "l"), _type(payload, enter=True)),
+                        f"search the web for {payload!r}")
+            return ({"action": "site_search", "text": payload},
+                    f"search this page for {payload!r}")
 
     # 2) Navigate to a website:  "go to youtube.com" / "open netflix.com"
     #    ("go to X.com" just means: focus the address bar, type X.com, press Enter)
@@ -357,6 +380,107 @@ def _match_typing(command: str) -> tuple[dict | None, str | None]:
         return _type(payload, enter=enter), f"type {payload!r}"
 
     return None, None
+
+
+# ── Raw input control ─────────────────────────────────────────────────────────
+# Manual, deterministic mouse/keyboard control for when the smart targeting can't
+# find the right thing: "press enter", a bare "click" (click wherever the cursor
+# already is), and "move the pointer up/down/left/right". These never take a
+# screenshot and never call the model — they do exactly the literal thing.
+_KEY_WORDS = {
+    "enter": "enter", "return": "enter", "submit": "enter",
+    "tab": "tab", "space": "space", "spacebar": "space", "space bar": "space",
+    "escape": "esc", "esc": "esc",
+    "backspace": "backspace", "back space": "backspace", "delete": "delete",
+    "up": "up", "down": "down", "left": "left", "right": "right",
+    "up arrow": "up", "down arrow": "down", "left arrow": "left", "right arrow": "right",
+    "page up": "pageup", "page down": "pagedown", "home": "home", "end": "end",
+}
+_MOVE_AMOUNTS = (
+    (r"\b(a lot|lots|far|way|a bunch|a ton|much more|a long way)\b", 320),
+    (r"\b(a little|a bit|slightly|a touch|a tiny bit|a smidge|small|barely)\b", 40),
+)
+
+def _match_input_control(command: str) -> tuple[dict | None, str | None]:
+    c = command.strip().lower().rstrip(" .!?")
+
+    # press / hit / push a named key
+    m = re.match(r"(?i)^(?:press|hit|push|tap)(?:\s+(?:the|on))?\s+(.+?)(?:\s+key|\s+button)?$", c)
+    if m:
+        key = _KEY_WORDS.get(m.group(1).strip())
+        if key:
+            return {"action": "hotkey", "keys": [key]}, f"press {key}"
+
+    # bare click / double-click / right-click where the cursor already is
+    if re.match(r"^(?:left[-\s]?)?click(?:\s+(?:here|now|it|there|the mouse|mouse))?$", c) \
+            or c in ("just click", "click please", "left click"):
+        return {"action": "click_here", "button": "left", "clicks": 1}, "click here"
+    if re.match(r"^double[-\s]?click(?:\s+(?:here|now|there))?$", c):
+        return {"action": "click_here", "button": "left", "clicks": 2}, "double-click"
+    if re.match(r"^right[-\s]?click(?:\s+(?:here|now|there))?$", c):
+        return {"action": "click_here", "button": "right", "clicks": 1}, "right-click"
+
+    # move the pointer/cursor/mouse in a direction (optionally by an amount)
+    m = re.match(r"(?i)^move(?:\s+(?:the|my))?\s*(?:pointer|cursor|mouse)?\s*"
+                 r"(up|down|left|right)\b(.*)$", c)
+    if m:
+        direction, rest = m.group(1), m.group(2)
+        amount = 120
+        for pat, val in _MOVE_AMOUNTS:
+            if re.search(pat, rest):
+                amount = val
+                break
+        mnum = re.search(r"(\d+)\s*(?:pixels?|px)?", rest)
+        if mnum:
+            amount = int(mnum.group(1))
+        dx = {"left": -amount, "right": amount}.get(direction, 0)
+        dy = {"up": -amount, "down": amount}.get(direction, 0)
+        return ({"action": "move", "dx": dx, "dy": dy},
+                f"move pointer {direction} {amount}px")
+
+    return None, None
+
+
+# ── Self-correction: did the command land on the right page? ───────────────────
+# After a command, we compare Chrome's active-tab URL/title against the site the
+# user named. If they wanted Amazon but we're on GitHub (or a stray new tab), we
+# apologise and go back. We also accept an explicit "that's wrong, go back".
+_SITE_BRANDS = {
+    "amazon": "amazon", "youtube": "youtube", "netflix": "netflix",
+    "wikipedia": "wikipedia", "reddit": "reddit", "facebook": "facebook",
+    "instagram": "instagram", "twitter": "twitter", "github": "github",
+    "ebay": "ebay", "walmart": "walmart", "target": "target",
+    "bestbuy": "bestbuy", "linkedin": "linkedin", "yahoo": "yahoo",
+    "spotify": "spotify", "twitch": "twitch", "tiktok": "tiktok",
+    "gmail": "mail.google", "google": "google", "bing": "bing",
+    "stackoverflow": "stackoverflow", "cnn": "cnn", "espn": "espn",
+}
+_PLACE_PREP = r"(?:on|onto|in|into|to|at|from|using|open|visit|go to|navigate to|over to)"
+
+def _expected_site(command: str) -> str | None:
+    """The website a command clearly wants to land on (for result verification),
+    or None. Conservative on purpose: only an explicit domain or a KNOWN brand
+    used as a PLACE counts, so "search for amazon rainforest" (amazon as a topic,
+    not a destination) does not trigger a false "wrong page"."""
+    c = command.lower()
+    m = re.search(r"\b([a-z0-9][a-z0-9-]*)\.(?:com|org|net|io|co|tv|gov|edu|ai)\b", c)
+    if m:
+        return m.group(1)
+    for brand, domain in _SITE_BRANDS.items():
+        if re.search(rf"\b{_PLACE_PREP}\s+(?:the\s+)?{re.escape(brand)}\b", c):
+            return domain
+    return None
+
+_UNDO_RE = re.compile(
+    r"(?i)(?:\bundo (?:that|it|this)\b|\bthat'?s?(?: was)? wrong\b|"
+    r"\bthat'?s not right\b|\bthat'?s incorrect\b|\byou (?:did|got) (?:that|it) wrong\b|"
+    r"\bwrong (?:page|tab)\b|\brevert that\b|"
+    r"\bgo back to (?:the )?(?:original|previous|last) (?:page|tab|site)\b)")
+
+def _is_undo_request(command: str) -> bool:
+    """True for "that's wrong, go back" style corrections (not plain "go back",
+    which is the normal browser-back shortcut)."""
+    return bool(_UNDO_RE.search(command.strip()))
 
 
 def match_shortcut(command: str) -> tuple[dict | None, str | None]:
@@ -497,6 +621,8 @@ def _changes_page(action: dict) -> bool:
         return any(_changes_page(s) for s in action.get("steps", []))
     if k == "hotkey":
         keys = list(action.get("keys", []))
+        if keys == ["enter"]:             # Enter usually submits / loads a page
+            return True
         m = plat.mod_key()
         nav = ([m, "r"], [m, "shift", "r"], [m, "["], [m, "]"], [m, "t"])
         if not plat.IS_MAC:
@@ -893,6 +1019,44 @@ def _looks_clicky(command: str) -> bool:
     return bool(re.search(rf"(?i)\b(?:{_CLICK_VERB})\b", command))
 
 
+# A page's OWN search box, located from OCR so "search X" can stay on the site
+# (e.g. Amazon's bar) rather than always hitting Google in the address bar. Most
+# sites render readable placeholder text ("Search", "Search Amazon").
+_SEARCH_BOX_BAD = re.compile(r"(?i)\b(results?|history|settings?|suggestions?)\b")
+
+def find_search_box(elements: list[dict]) -> dict | None:
+    """Best on-page search field from OCR placeholder text, or None.
+
+    Prefers a short 'Search' / 'Search <site>' placeholder in the upper part of
+    the page (where search bars live) and returns the element to click to focus
+    it. Returns None when nothing looks like a search box (e.g. a blank tab), so
+    the caller can fall back to a Google search in the address bar."""
+    screen_w, screen_h = pyautogui.size()
+    best, best_score = None, -1.0
+    for el in elements:
+        t = (el.get("text") or "").strip()
+        low = t.lower()
+        if "search" not in low or len(t) > 40:
+            continue
+        if _SEARCH_BOX_BAD.search(low):     # "search results", "search history", …
+            continue
+        y = el.get("y", 0)
+        if y > screen_h * 0.55:             # search bars sit up top, not mid-page
+            continue
+        width = el.get("x1", 0) - el.get("x0", 0)
+        if low == "search":
+            score = 40.0
+        elif low.startswith("search ") and len(low) <= 24:
+            score = 55.0                    # "Search Amazon", "Search amazon.com"
+        else:
+            score = 10.0
+        score += min(width, 420) / 20       # wider boxes are more likely the field
+        score -= (y / max(1, screen_h)) * 25  # nearer the top is better
+        if score > best_score:
+            best, best_score = el, score
+    return best
+
+
 def ask_groq_vision(client: Groq, command: str, elements: list[dict]) -> dict:
     """Send the ACTUAL screenshot to a Groq vision model to locate a click.
 
@@ -906,53 +1070,82 @@ def ask_groq_vision(client: Groq, command: str, elements: list[dict]) -> dict:
         the only way to hit a purely-visual target (e.g. "click the green
         profile" on a Netflix avatar grid, where no text covers the square)."""
     shown = elements[:80]
-    img = pyautogui.screenshot().convert("RGB")
     screen_w, screen_h = pyautogui.size()
-    sx = img.width / screen_w if screen_w else 1.0
-    sy = img.height / screen_h if screen_h else 1.0
+
+    # Crop the screenshot to the Chrome window so the target FILLS the image:
+    # the red box numbers are legible and the point-fallback is far more accurate
+    # than pointing inside a tiny part of the whole desktop. We track the crop's
+    # logical origin (ox, oy) and size (rw, rh) so we can map element boxes INTO
+    # the image and a returned point% back OUT to real screen coordinates.
+    bounds = plat.get_chrome_window_bounds(log_fn=log)
+    if bounds:
+        ox, oy, rw, rh = bounds
+        rw, rh = max(1, rw), max(1, rh)
+        img = pyautogui.screenshot(region=(ox, oy, rw, rh)).convert("RGB")
+    else:
+        ox, oy, rw, rh = 0, 0, screen_w, screen_h
+        img = pyautogui.screenshot().convert("RGB")
+    sx = img.width / rw if rw else 1.0
+    sy = img.height / rh if rh else 1.0
+
     draw = ImageDraw.Draw(img)
     for i, e in enumerate(shown):
-        x0, y0 = int(e["x0"] * sx), int(e["y0"] * sy)
-        x1, y1 = int(e["x1"] * sx), int(e["y1"] * sy)
+        x0, y0 = int((e["x0"] - ox) * sx), int((e["y0"] - oy) * sy)
+        x1, y1 = int((e["x1"] - ox) * sx), int((e["y1"] - oy) * sy)
         draw.rectangle([x0, y0, x1, y1], outline=(255, 0, 0), width=2)
         draw.text((x0 + 1, max(0, y0 - 13)), str(i), fill=(255, 0, 0))
     data_url = groq_vision.image_to_data_url(img, max_size=1400)
 
     prompt = (
-        'This is a full screenshot. Red numbered boxes mark the text the page OCR '
-        f'found. The user wants to click something; they said: "{command}".\n'
-        "- If a numbered box is the thing to click, reply {\"index\": N}.\n"
-        "- If the thing to click is an image, icon, avatar, thumbnail, button, or "
-        "a coloured area that is NOT covered by a box, reply "
-        "{\"point\": [x, y]} where x and y are PERCENTAGES from 0 to 100 of the "
-        "image width and height at the CENTRE of that thing. Use what you SEE "
-        "(colours, pictures), not just the text.\n"
+        'This is a screenshot of a Google Chrome window. Red numbered boxes mark '
+        'the text OCR detected. The user wants to click ONE thing; they said: '
+        f'"{command}".\n'
+        "Look at the image and decide what to click.\n"
+        "- If it is one of the numbered boxes (or that box's text), reply "
+        "{\"index\": N} with that number.\n"
+        "- If it is an image, icon, avatar, thumbnail, button, logo, or a coloured "
+        "area NOT covered by a box, reply {\"point\": [x, y]} where x and y are "
+        "PERCENTAGES from 0 to 100 of the image width and height at the CENTRE of "
+        "that thing. Use what you SEE (colours, pictures, layout), not just text.\n"
         "- If nothing matches, reply {\"index\": -1}.\n"
         "Reply with ONLY the JSON object."
     )
-    log("GROQ", f"VISION: sending annotated screenshot ({len(shown)} boxes) to "
-                f"{groq_vision.VISION_MODEL}")
-    with Timer("GROQ", "vision click localization"):
-        response = client.chat.completions.create(
-            model=groq_vision.VISION_MODEL,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ]}],
-            temperature=0, max_tokens=60, timeout=GROQ_TIMEOUT,
-        )
-    raw = (response.choices[0].message.content or "").strip()
+
+    # Prefer the click model (primary); fall back to the page model on error or an
+    # empty reply, since vision is now the main path for every click. Deduped so we
+    # never call the same model twice when they're currently the same (Scout).
+    raw, last_err = "", None
+    for model in dict.fromkeys((groq_vision.VISION_CLICK_MODEL, groq_vision.VISION_MODEL)):
+        try:
+            log("GROQ", f"VISION: sending annotated screenshot ({len(shown)} boxes) to {model}")
+            with Timer("GROQ", "vision click localization"):
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ]}],
+                    temperature=0, max_tokens=60, timeout=GROQ_TIMEOUT,
+                )
+            raw = (response.choices[0].message.content or "").strip()
+            if raw:
+                break
+        except Exception as e:
+            last_err = e
+            log("GROQ", f"vision model {model} failed: {e}", "WARN")
+    if not raw:
+        raise RuntimeError(f"vision request failed: {last_err}")
     log("GROQ", f"vision raw: {raw!r}")
 
     is_video = bool(re.search(r"\b(video|thumbnail|clip|movie)\b", command, re.I)) \
         or bool(re.match(r"(?i)\s*play\b", command))
 
-    # 1) Direct point (percentages) — for purely-visual targets with no OCR box.
+    # 1) Direct point (percentages of the CROPPED image) — map back to the screen.
     pt = _parse_vision_point(raw)
     if pt is not None:
         px, py = pt
-        x = int(max(0, min(100, px)) / 100 * screen_w)
-        y = int(max(0, min(100, py)) / 100 * screen_h)
+        x = int(ox + max(0, min(100, px)) / 100 * rw)
+        y = int(oy + max(0, min(100, py)) / 100 * rh)
         log("GROQ", f"vision pointed at {px:.1f}%,{py:.1f}% -> ({x}, {y})")
         return {"action": "click", "x": x, "y": y}
 
@@ -1017,6 +1210,18 @@ def execute_action(action: dict) -> str:
         pyautogui.moveTo(x, y, duration=0.3)
         pyautogui.click(x, y)
         return f"Clicked ({x}, {y})"
+    elif kind == "click_here":
+        # Click wherever the cursor already is (manual control).
+        clicks = int(action.get("clicks", 1))
+        button = action.get("button", "left")
+        pyautogui.click(clicks=clicks, interval=0.08, button=button)
+        return f"Clicked ({button}, {clicks}×) at cursor"
+    elif kind == "move":
+        # Nudge the pointer by a relative offset (manual control).
+        dx, dy = int(action.get("dx", 0)), int(action.get("dy", 0))
+        pyautogui.moveRel(dx, dy, duration=0.2)
+        x, y = pyautogui.position()
+        return f"Moved pointer to ({x}, {y})"
     elif kind == "scroll":
         direction = action.get("direction", "down")
         amount = int(action.get("amount", 3))
@@ -1076,6 +1281,9 @@ class App(tk.Tk):
         self._key_q: queue.Queue = queue.Queue()
         self._grave_down = False
         self._pending_audio: sr.AudioData | None = None
+        # Page to return to if a command lands somewhere wrong (or the user says
+        # "that's wrong, go back"). Captured before each acting command.
+        self._undo_target: dict | None = None
         # chat transcript: a queue of (role, text) streamed one word at a time so
         # the panel reads like a little conversation instead of a flickering line.
         self._chat_queue: list[tuple[str, str]] = []
@@ -1592,6 +1800,18 @@ class App(tk.Tk):
             self._set_status("Focusing Chrome…", ACCENT)
             trial["chrome_activated"] = activate_chrome()
 
+            # Explicit "that's wrong, go back" → revert to the page we last left.
+            if _is_undo_request(command):
+                self._handle_undo_request(trial)
+                return
+
+            # Remember where we are, so we can check the result landed on the
+            # right page and undo it (or a later "that's wrong") if it didn't.
+            before_state = plat.get_chrome_state()
+            self._undo_target = before_state
+            if before_state:
+                log("VERIFY", f"before: {before_state.get('url') or before_state.get('title')!r}")
+
             # ── Stage 3: split into stacked sub-commands and run each ─────────
             commands = split_commands(command)
             trial["commands"] = commands
@@ -1623,9 +1843,13 @@ class App(tk.Tk):
             summary = (steps[-1]["result"] if len(commands) == 1
                        else f"{len(commands)} steps done")
             self._set_status(f"✓ {summary}", OK)
-            _log_trial(trial)
             self._set_trial_info(f"logged → {TRIAL_LOG.name}")
             log("PIPELINE", f"SUCCESS — {summary}")
+
+            # ── Self-check: did we land on the page the user named? Undo if not.
+            undone = self._verify_outcome(command, before_state)
+            trial["self_corrected"] = undone
+            _log_trial(trial)
 
         except json.JSONDecodeError as e:
             log("GROQ", f"model returned non-JSON: {e}", "ERROR")
@@ -1664,35 +1888,58 @@ class App(tk.Tk):
         # A "click/tap/select …" command is never a Chrome shortcut, so skip the
         # shortcut table — otherwise a title word like "reload" or "settings"
         # could fire the wrong hotkey instead of clicking the element.
-        if _CLICK_INTENT.match(sub):
-            action, desc = None, None
-        else:
-            action, desc = match_shortcut(sub)
+        method, ecount = None, None
+        # 0) Raw input control — "press enter", bare "click" (where the cursor
+        #    already is), "move the pointer up". Deterministic and screenshot-free,
+        #    and checked FIRST so "press"/"click" aren't sent down the element-
+        #    targeting path (a bare "click" should just click, not hunt for text).
+        action, desc = _match_input_control(sub)
         if action is not None:
-            log("RESOLVE", f"{sub!r} -> shortcut: {desc}")
+            log("RESOLVE", f"{sub!r} -> input: {desc}")
             self._set_status(f"{label}{desc}", ACCENT)
-            method, ecount = "shortcut", None
+            method = "input"
         else:
-            log("RESOLVE", f"{sub!r} -> no shortcut, taking a screenshot")
-            self._set_status(f"{label}Looking at the screen…", ACCENT)
-            self._chat_status("Looking at the screen…")
-            elements = capture_screen_elements()
-            ecount = len(elements)
-            # Try matching the spoken title directly first (deterministic).
-            local = match_click_target(sub, elements)
-            if local is not None:
-                action, method = local, "match"
-            elif _looks_clicky(sub):
-                # Click we couldn't match locally → let the vision model SEE the
-                # screenshot and pick the element (precise OCR coordinate).
-                self._set_status(f"{label}Looking with AI vision…", ACCENT)
-                action = ask_groq_vision(self.groq, sub, elements)
-                method = "vision-image"
+            if _CLICK_INTENT.match(sub):
+                action, desc = None, None
             else:
-                # Non-click command (scroll/type/etc.) → text model is fine.
-                self._set_status(f"{label}Asking AI…", ACCENT)
-                action = ask_groq(self.groq, sub, elements)
-                method = "vision-text"
+                action, desc = match_shortcut(sub)
+            if action is not None and action.get("action") == "site_search":
+                # Needs the screen: find the current page's own search box.
+                action, method, ecount, desc = self._resolve_site_search(
+                    action["text"], label)
+                log("RESOLVE", f"{sub!r} -> {desc}")
+                self._set_status(f"{label}{desc}", ACCENT)
+            elif action is not None:
+                log("RESOLVE", f"{sub!r} -> shortcut: {desc}")
+                self._set_status(f"{label}{desc}", ACCENT)
+                method = "shortcut"
+            else:
+                log("RESOLVE", f"{sub!r} -> no shortcut, taking a screenshot")
+                self._set_status(f"{label}Looking at the screen…", ACCENT)
+                self._chat_status("Looking at the screen…")
+                elements = capture_screen_elements()
+                ecount = len(elements)
+                if _looks_clicky(sub):
+                    # CLICK → always let the vision model SEE the screenshot and
+                    # choose the target. The deterministic title matcher is now
+                    # only a safety net for when vision finds nothing (or errors),
+                    # so we never silently click the wrong line without asking AI.
+                    self._set_status(f"{label}Looking with AI vision…", ACCENT)
+                    self._chat_status("Looking at the screen with AI vision…")
+                    try:
+                        action = ask_groq_vision(self.groq, sub, elements)
+                        method = "vision-image"
+                    except Exception as e:
+                        log("RESOLVE", f"vision found nothing ({e}) → local match", "WARN")
+                        local = match_click_target(sub, elements)
+                        if local is None:
+                            raise
+                        action, method = local, "match-fallback"
+                else:
+                    # Non-click command (scroll/type/etc.) → text model is fine.
+                    self._set_status(f"{label}Asking AI…", ACCENT)
+                    action = ask_groq(self.groq, sub, elements)
+                    method = "vision-text"
         # Tell the user what we're about to do, then do it.
         self._chat_say("bot", self._plan_phrase(sub, action, desc))
         with Timer("EXECUTE"):
@@ -1703,6 +1950,120 @@ class App(tk.Tk):
         return {"command": sub, "action": action, "result": result,
                 "method": method, "element_count": ecount,
                 "changed_page": _changes_page(action)}
+
+    def _resolve_site_search(self, query: str, label: str = ""):
+        """Type a query into the CURRENT page's own search box (context-aware).
+
+        Looks at the screen for the page's search field and clicks it before
+        typing, so the search stays ON the site (e.g. Amazon's search bar). When
+        no on-page box is found (e.g. a blank tab), falls back to a Google search
+        in the address bar. Returns (action, method, element_count, description)."""
+        self._set_status(f"{label}Finding the page's search box…", ACCENT)
+        self._chat_status("Looking for the search box on this page…")
+        elements = capture_screen_elements()
+        ecount = len(elements)
+
+        # 1) Fast path: a readable "Search"/"Search <site>" placeholder in the OCR.
+        box = find_search_box(elements)
+        if box is not None:
+            x, y = int(box["x"]), int(box["y"])
+            log("RESOLVE", f"site search box {box['text'][:30]!r} at ({x}, {y})")
+            action = _seq({"action": "click", "x": x, "y": y},
+                          _type(query, enter=True))
+            return action, "site-search", ecount, f"search this page for {query!r}"
+
+        # 2) OCR found no labelled box — the field is often empty, its placeholder
+        #    is faint, or it's just a magnifying-glass icon (true on Amazon). Let
+        #    the vision model SEE the page and point at the search box.
+        try:
+            self._set_status(f"{label}Looking for the search box with AI…", ACCENT)
+            click = ask_groq_vision(
+                self.groq,
+                "the main search box / search bar on this page — the empty field "
+                "where you type a query to search this site, usually near the top "
+                "next to a magnifying-glass icon",
+                elements)
+            x, y = int(click["x"]), int(click["y"])
+            log("RESOLVE", f"vision located the search box at ({x}, {y})")
+            action = _seq({"action": "click", "x": x, "y": y},
+                          _type(query, enter=True))
+            return action, "site-search-vision", ecount, f"search this page for {query!r}"
+        except Exception as e:
+            log("RESOLVE", f"vision couldn't find a search box ({e}) → using Google")
+
+        # 3) Nothing on the page looks like a search box (e.g. a blank tab).
+        action = _seq(plat.hotkey_action("mod", "l"), _type(query, enter=True))
+        return action, "site-search-web", ecount, f"search the web for {query!r}"
+
+    # ── Self-correction ─────────────────────────────────────────────────────────
+    def _verify_outcome(self, command: str, before: dict | None) -> bool:
+        """After a command, check we're on the page the user named; undo if not.
+
+        Only acts when the command clearly named a site (e.g. "… on Amazon" or a
+        domain) — otherwise we can't judge and we leave it alone. Returns True if
+        we detected a wrong result and reverted."""
+        expected = _expected_site(command)
+        if not expected:
+            return False
+        time.sleep(1.0)                 # let the final navigation settle first
+        after = plat.get_chrome_state()
+        if not after:
+            log("VERIFY", "couldn't read Chrome state — skipping self-check", "WARN")
+            return False
+        hay = f"{after.get('url', '')} {after.get('title', '')}".lower()
+        if expected.lower() in hay:
+            log("VERIFY", f"correct — on {expected!r}")
+            return False
+        landed = after.get("url") or after.get("title") or "an unknown page"
+        log("VERIFY", f"WRONG — wanted {expected!r}, landed on {landed!r}", "WARN")
+        self._set_status("That went to the wrong place — going back…", WARN)
+        self._chat_say("warn", f"Sorry — that doesn't look like {expected}. I think "
+                               f"I did that wrong, so I'm taking you back.")
+        self._restore_page(before, after)
+        self._chat_say("ok", "Okay, you're back where you were.")
+        self._set_status("✓ Took you back", OK)
+        return True
+
+    def _handle_undo_request(self, trial: dict):
+        """User said "that's wrong, go back" — revert to the page we last left."""
+        target = self._undo_target
+        if not target:
+            log("UNDO", "no page to go back to")
+            self._set_status("Nothing to undo", WARN)
+            self._chat_say("warn", "I don't have a previous page to take you back to.")
+            trial["success"], trial["error"] = False, "no undo target"
+            _log_trial(trial)
+            return
+        landed = target.get("url") or target.get("title")
+        log("UNDO", f"reverting to {landed!r}")
+        self._set_status("Going back…", ACCENT)
+        self._chat_say("bot", "Okay, sorry — taking you back to the previous page.")
+        self._restore_page(target, plat.get_chrome_state())
+        self._undo_target = None            # consumed
+        self._set_status("✓ Back to previous page", OK)
+        self._chat_say("ok", "Done — you're back on the previous page.")
+        trial["undo"], trial["success"] = True, True
+        _log_trial(trial)
+
+    def _restore_page(self, before: dict | None, after: dict | None):
+        """Best-effort return to `before`: close any stray tabs the wrong command
+        opened, then re-navigate to the original URL if we're not already on it."""
+        bt = (before or {}).get("tab_count")
+        at = (after or {}).get("tab_count")
+        if bt and at and at > bt:                       # close extra/stray tabs
+            for _ in range(min(at - bt, 5)):
+                pyautogui.hotkey(plat.mod_key(), "w")
+                time.sleep(0.35)
+        url = (before or {}).get("url") or ""
+        time.sleep(0.2)
+        cur = plat.get_chrome_state() or {}
+        base = url.split("?")[0].split("#")[0]
+        if url.startswith("http") and base and base not in (cur.get("url") or ""):
+            log("UNDO", f"re-navigating to {url!r}")
+            execute_action(_seq(plat.hotkey_action("mod", "l"), _type(url, enter=True)))
+        elif not url.startswith("http"):
+            log("UNDO", "no saved URL — pressing browser Back")
+            pyautogui.hotkey(plat.mod_key(), "[")       # macOS back
 
     # ── turning a command / action into a friendly sentence ─────────────────────
     def _plan_phrase(self, sub: str, action: dict, desc: str | None) -> str:

@@ -42,6 +42,9 @@ in **System Settings → Privacy & Security**, for whichever app runs Python
 - **Accessibility** — needed for clicks and keystrokes (`pyautogui`).
 - **Screen Recording** — needed for screenshots/OCR.
 - **Microphone** — needed for voice capture.
+- **Automation → Google Chrome** — needed for the self-check/undo feature to
+  read the active tab's URL (`plat.get_chrome_state`). Granted on first use via a
+  one-time prompt; without it the self-check simply skips.
 
 Page Reader also needs **Accessibility** (global hotkeys, click-to-read) and
 **Screen Recording** (OCR).
@@ -116,9 +119,29 @@ Hold-to-talk voice commands that control Google Chrome.
    three commands. "search for cats and dogs" stays one command.
 5. **Per sub-command, resolve + execute** (`_run_subcommand`):
    - **Typing / search / navigation** (`_match_typing`): "type X into the search
-     bar", "search for X", "go to youtube.com" → focus the field, **paste** the
-     text (Cmd+V, reliable on macOS), optionally press Enter. Spoken URLs like
-     "youtube dot com" are normalised to "youtube.com".
+     bar", "go to youtube.com" → focus the field, **paste** the text (Cmd+V,
+     reliable on macOS), optionally press Enter. Spoken URLs like "youtube dot
+     com" are normalised to "youtube.com".
+   - **Context-aware search** (`_match_typing` → `site_search` → `find_search_box`):
+     a bare "search X" / "search up X" / "look up X" searches the **current
+     page's own search box** so the user stays on the site — e.g. on Amazon,
+     "search up clothing" types into Amazon's bar, not the address bar. We take a
+     screenshot, locate the page's search field from OCR placeholder text
+     (`find_search_box`: a short "Search"/"Search <site>" line up top), click it,
+     then paste + Enter. When **no** on-page box is found (e.g. a blank tab) it
+     falls back to a Google search in the address bar. Saying "google X" /
+     "search the web for X" / "search X in the address bar" **forces** the
+     omnibox Google search.
+   - **Raw input control** (`_match_input_control`, checked FIRST in
+     `_run_subcommand`): literal manual control for when smart targeting can't
+     find the right thing — "press enter" / "press escape" / "press the down
+     arrow" (presses that key), a **bare** "click" / "double click" / "right
+     click" (clicks wherever the cursor already is, `click_here`), and "move the
+     pointer up/down/left/right [a little | a lot | by N]" (`move`, relative
+     nudge). Deterministic, never screenshots or calls the model. Checked before
+     the click-intent skip so "press …"/"click" aren't sent down the element-
+     targeting path; "click on X" / "press the blue button" still target normally
+     because the trailing word isn't a bare click / known key.
    - **Shortcut fast-path** (`match_shortcut` / `CHROME_SHORTCUTS`): new/close/
      reopen tab, reload, find, zoom, scroll, bookmarks, etc. → fire the hotkey,
      no screenshot/AI.
@@ -151,6 +174,17 @@ Hold-to-talk voice commands that control Google Chrome.
    page-changing step (`_changes_page`) so later clicks see the new screen.
 6. **Execute** — `pyautogui` performs the hotkey / click / scroll / type, or a
    `sequence` of those.
+7. **Self-check + undo** (`_verify_outcome` / `_restore_page`): when the command
+   clearly named a site ("search paper **on Amazon**", "go to **youtube.com**"),
+   after running we read Chrome's active-tab URL/title (`plat.get_chrome_state`,
+   AppleScript on macOS) and confirm the named site is there. If a wrong command
+   opened a stray tab or landed on the wrong site, we apologise in the transcript
+   and **go back** — closing extra tabs, then re-navigating to the page we were on
+   before (`self._undo_target`). Verification is **conservative**: it only fires
+   when a site is named as a destination (so "search for amazon rainforest" — a
+   topic, not a place — never triggers it). The user can also say **"that's
+   wrong, go back"** / "undo that" / "you did that wrong" (`_is_undo_request`) to
+   revert manually; plain "go back" stays the normal browser-back shortcut.
 
 Every run logs each step to the terminal with timings, and appends a JSON line to
 `features/voice_control/trials.jsonl` (`commands`, per-step `method` =

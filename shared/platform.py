@@ -166,6 +166,59 @@ def activate_chrome(log_fn=None) -> bool:
         return False
 
 
+_CHROME_STATE_AS = (
+    'tell application "Google Chrome"\n'
+    '  if (count of windows) = 0 then return ""\n'
+    '  set theURL to URL of active tab of front window\n'
+    '  set theTitle to title of active tab of front window\n'
+    '  set tabCount to count of tabs of front window\n'
+    '  set winCount to count of windows\n'
+    '  return theURL & "\\n" & theTitle & "\\n" & tabCount & "\\n" & winCount\n'
+    'end tell'
+)
+
+
+def get_chrome_state(log_fn=None) -> dict | None:
+    """Best-effort snapshot of Chrome's active tab — for verifying a command
+    landed on the right page and for undoing it if not.
+
+    Returns {"url", "title", "tab_count", "win_count"} or None. On macOS this
+    reads the live URL via AppleScript (needs Automation → Chrome permission).
+    On Windows the URL isn't scriptable, so "url" is "" and "title" comes from
+    the window title (enough to keyword-match the site name)."""
+    def _log(msg: str, level: str = "INFO"):
+        if log_fn:
+            log_fn("CHROME", msg, level)
+
+    try:
+        if IS_MAC:
+            r = subprocess.run(["osascript", "-e", _CHROME_STATE_AS],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode != 0:
+                _log(f"chrome state error: {r.stderr.strip()}", "WARN")
+                return None
+            parts = (r.stdout or "").strip().split("\n")
+            if len(parts) < 4:
+                return None
+            return {"url": parts[0].strip(), "title": parts[1].strip(),
+                    "tab_count": int(parts[2]), "win_count": int(parts[3])}
+        elif IS_WINDOWS:
+            import pygetwindow as gw
+
+            wins = [w for w in gw.getAllWindows()
+                    if w.title and "chrome" in w.title.lower() and w.visible]
+            if not wins:
+                return None
+            title = wins[0].title
+            # window title is "<page title> - Google Chrome"
+            title = title.rsplit(" - Google Chrome", 1)[0]
+            return {"url": "", "title": title, "tab_count": None, "win_count": len(wins)}
+        return None
+    except Exception as e:
+        _log(f"could not read Chrome state: {e}", "WARN")
+        return None
+
+
 def configure_tesseract():
     """Point pytesseract at the binary if it is not already on PATH."""
     import pytesseract
