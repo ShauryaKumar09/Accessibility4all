@@ -320,3 +320,4 @@ if __name__ == "__main__":
                flush=True)
     Hub().mainloop()
     safe_print("[hub] hub closed", flush=True)
+

@@ -137,10 +137,14 @@ Hold-to-talk voice commands that control Google Chrome.
      like "reload" can't fire a hotkey.
    - **Vision fallback for clicks** (`ask_groq_vision`): when a click can't be
      matched locally, the **actual screenshot** is sent to a Groq **vision** model
-     (`llama-4-scout`) with a numbered red box drawn over each OCR element; the
-     model SEES the page and returns the box number, and we click that box's
-     verified OCR coordinate (thumbnail offset still applies for videos). This
-     replaces the old text-only guess that often missed.
+     (`llama-4-scout`) with a numbered red box drawn over each OCR element. The
+     model SEES the page and replies one of two ways: `{"index": N}` → we click
+     box N's **verified OCR coordinate** (precise; thumbnail offset still applies
+     for videos); or `{"point": [x%, y%]}` → for purely-**visual** targets that
+     OCR can't see (images, icons, avatars, coloured tiles like a Netflix profile
+     square — "click the green profile"), the model points at the centre as
+     percentages and we click there. Text stays pixel-precise via OCR; visual
+     targets are reachable at all via the point path.
    - **Text fallback** (`ask_groq`): non-click commands (scroll/type into a field)
      send the numbered element **text** list to the text model for an index.
    Each vision step takes a **fresh** screenshot, and the loop **waits** after a

@@ -424,10 +424,12 @@ def _match_scroll(command: str) -> tuple[dict | None, str | None]:
 # sequence words ("then", "and then") and on "and"/comma only when the next word
 # starts a new command (an action verb) — so "search for cats and dogs" stays one
 # command while "open a tab and go to youtube" becomes two.
+# Trailing (?:ed|s|ing)? lets STT inflections ("clicked", "going", "searches")
+# still register as a command-start verb when splitting an utterance.
 _VERB = (r"(?:open|go|navigate|visit|head|take|bring|click|tap|press|select|search|"
          r"google|look|type|enter|write|input|paste|put|scroll|close|reopen|"
          r"bookmark|reload|refresh|zoom|copy|cut|undo|redo|find|play|pause|mute|"
-         r"minimi[sz]e|quit|download|switch|hit|watch|start)")
+         r"minimi[sz]e|quit|download|switch|hit|watch|start)(?:ed|s|ing)?")
 
 def split_commands(command: str) -> list[str]:
     text = command.strip()
@@ -635,9 +637,16 @@ _STOP_MATCH = {
     "picture", "called", "titled", "named", "labeled", "title", "says", "saying",
     "clip", "movie", "onto", "watch",
 }
+# Click verbs incl. common STT inflections ("clicked", "tapping", "presses") so a
+# past/continuous-tense transcription still parses as a click command. Google STT
+# very often returns "clicked on …" instead of "click on …", and a bare `click\b`
+# never matches "clicked" — which silently dropped the spoken title.
+_CLICK_VERB = (r"click(?:ed|s|ing)?|tap(?:ped|s|ping)?|press(?:ed|es|ing)?|"
+               r"select(?:ed|s|ing)?|choose|chose|chosen|choosing|"
+               r"open(?:ed|s|ing)?|play(?:ed|s|ing)?|hit(?:s|ting)?")
 # A click-on-element command (never a Chrome keyboard shortcut) — used to keep
 # title words like "reload"/"settings" from being mistaken for a shortcut.
-_CLICK_INTENT = re.compile(r"(?i)^\s*(?:click|tap|press|select|choose)\b")
+_CLICK_INTENT = re.compile(rf"(?i)^\s*(?:{_CLICK_VERB})\b")
 _ORDINALS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh",
              "eighth", "ninth", "tenth", "last", "next", "previous", "top", "bottom"}
 _ORDINAL_MAP = {
@@ -664,7 +673,7 @@ def _word_in(w: str, ewords: list[str]) -> bool:
 
 def _extract_click_target(command: str) -> str | None:
     """Pull the title/description out of a click command, or None if it isn't one."""
-    m = re.match(r"(?i)^\s*(?:click|tap|press|open|play|select|choose|hit)\b\s*"
+    m = re.match(rf"(?i)^\s*(?:{_CLICK_VERB})\b\s*"
                  r"(?:on\b\s*)?(.*)$", command.strip())
     if not m:
         return None
@@ -748,7 +757,8 @@ def _clickable_candidates(elements: list[dict], screen_w: int, screen_h: int,
 
 def _match_tab_label(command: str, elements: list[dict]) -> dict | None:
     """Click Google result tabs like Images, Videos, News."""
-    if not re.search(r"\b(click|go|open|switch|tap|press)\b", command, re.I):
+    if not re.search(rf"\b(?:{_CLICK_VERB}|go(?:es|ing)?|switch(?:ed|es|ing)?)\b",
+                     command, re.I):
         return None
     want = None
     if re.search(r"\b(images?|photos?)\b", command, re.I):
@@ -846,7 +856,7 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
 
     # 2) Ordinal ("click the third video").
     oidx = _ordinal_index(command)
-    if oidx is not None and re.search(r"\b(click|tap|press|select|open|play)\b", command, re.I):
+    if oidx is not None and re.search(rf"\b(?:{_CLICK_VERB})\b", command, re.I):
         video_mode = is_video or bool(
             re.search(r"\b(video|result|thumbnail|link|item|title)\b", command, re.I))
         cands = _clickable_candidates(elements, screen_w, screen_h, video_only=video_mode)
@@ -880,21 +890,22 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
 
 def _looks_clicky(command: str) -> bool:
     """Is this a 'click/select an element' command (so we should use vision)?"""
-    return bool(re.search(r"(?i)\b(click|tap|press|select|choose|play|open)\b", command))
+    return bool(re.search(rf"(?i)\b(?:{_CLICK_VERB})\b", command))
 
 
 def ask_groq_vision(client: Groq, command: str, elements: list[dict]) -> dict:
     """Send the ACTUAL screenshot to a Groq vision model to locate a click.
 
-    We draw a numbered red box over each on-screen text element and ask the model
-    which box to click. The model gets to SEE the page (instead of guessing from
-    OCR text), but we click the verified OCR coordinate of the chosen box — never
-    a pixel the model made up — so it stays precise. For videos we still aim at
-    the thumbnail above the chosen title."""
+    Two ways the model can answer:
+      • {"index": N} — click numbered text box N. We then click that box's
+        VERIFIED OCR coordinate (never a model-invented pixel), so text clicks
+        stay precise. For videos we aim at the thumbnail above the title.
+      • {"point": [x, y]} — for things OCR can't see (images, icons, avatars,
+        colored tiles, thumbnails with no caption) the model points at the centre
+        as PERCENTAGES of the image. We click there. Less pixel-perfect, but it's
+        the only way to hit a purely-visual target (e.g. "click the green
+        profile" on a Netflix avatar grid, where no text covers the square)."""
     shown = elements[:80]
-    if not shown:
-        raise ValueError("nothing on screen to click")
-
     img = pyautogui.screenshot().convert("RGB")
     screen_w, screen_h = pyautogui.size()
     sx = img.width / screen_w if screen_w else 1.0
@@ -908,11 +919,16 @@ def ask_groq_vision(client: Groq, command: str, elements: list[dict]) -> dict:
     data_url = groq_vision.image_to_data_url(img, max_size=1400)
 
     prompt = (
-        'This Google Chrome screenshot has red numbered boxes over the clickable '
-        f'text on the page. The user said: "{command}".\n'
-        'Pick the box that best matches what they want to click. Reply with ONLY a '
-        'JSON object {"index": N} where N is the box number, or {"index": -1} if '
-        'nothing on screen matches.'
+        'This is a full screenshot. Red numbered boxes mark the text the page OCR '
+        f'found. The user wants to click something; they said: "{command}".\n'
+        "- If a numbered box is the thing to click, reply {\"index\": N}.\n"
+        "- If the thing to click is an image, icon, avatar, thumbnail, button, or "
+        "a coloured area that is NOT covered by a box, reply "
+        "{\"point\": [x, y]} where x and y are PERCENTAGES from 0 to 100 of the "
+        "image width and height at the CENTRE of that thing. Use what you SEE "
+        "(colours, pictures), not just the text.\n"
+        "- If nothing matches, reply {\"index\": -1}.\n"
+        "Reply with ONLY the JSON object."
     )
     log("GROQ", f"VISION: sending annotated screenshot ({len(shown)} boxes) to "
                 f"{groq_vision.VISION_MODEL}")
@@ -923,25 +939,62 @@ def ask_groq_vision(client: Groq, command: str, elements: list[dict]) -> dict:
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": data_url}},
             ]}],
-            temperature=0, max_tokens=40, timeout=GROQ_TIMEOUT,
+            temperature=0, max_tokens=60, timeout=GROQ_TIMEOUT,
         )
     raw = (response.choices[0].message.content or "").strip()
     log("GROQ", f"vision raw: {raw!r}")
-    mm = re.search(r"-?\d+", raw)
-    idx = int(mm.group()) if mm else -1
-    if not (0 <= idx < len(shown)):
-        raise ValueError(f"couldn't find that on screen (vision returned {idx})")
 
-    el = shown[idx]
     is_video = bool(re.search(r"\b(video|thumbnail|clip|movie)\b", command, re.I)) \
         or bool(re.match(r"(?i)\s*play\b", command))
-    if is_video:
-        x, y = _thumbnail_point(el, elements, screen_h)
-        log("GROQ", f"vision picked [{idx}] {el['text'][:50]!r} -> thumbnail ({x}, {y})")
-    else:
-        x, y = screen_ocr.click_point_for_element(el)
-        log("GROQ", f"vision picked [{idx}] {el['text'][:50]!r} at ({x}, {y})")
-    return {"action": "click", "x": x, "y": y}
+
+    # 1) Direct point (percentages) — for purely-visual targets with no OCR box.
+    pt = _parse_vision_point(raw)
+    if pt is not None:
+        px, py = pt
+        x = int(max(0, min(100, px)) / 100 * screen_w)
+        y = int(max(0, min(100, py)) / 100 * screen_h)
+        log("GROQ", f"vision pointed at {px:.1f}%,{py:.1f}% -> ({x}, {y})")
+        return {"action": "click", "x": x, "y": y}
+
+    # 2) Numbered text box → click its verified OCR coordinate.
+    idx = _parse_vision_index(raw)
+    if shown and 0 <= idx < len(shown):
+        el = shown[idx]
+        if is_video:
+            x, y = _thumbnail_point(el, elements, screen_h)
+            log("GROQ", f"vision picked [{idx}] {el['text'][:50]!r} -> thumbnail ({x}, {y})")
+        else:
+            x, y = screen_ocr.click_point_for_element(el)
+            log("GROQ", f"vision picked [{idx}] {el['text'][:50]!r} at ({x}, {y})")
+        return {"action": "click", "x": x, "y": y}
+
+    raise ValueError(f"couldn't find that on screen (vision said {raw!r})")
+
+
+def _parse_vision_point(raw: str) -> tuple[float, float] | None:
+    """Pull a {"point": [x, y]} percentage pair out of the model reply, if any."""
+    try:
+        obj = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        obj = None
+    if isinstance(obj, dict) and isinstance(obj.get("point"), (list, tuple)) \
+            and len(obj["point"]) == 2:
+        try:
+            return float(obj["point"][0]), float(obj["point"][1])
+        except (TypeError, ValueError):
+            return None
+    # tolerate "point": [x, y] embedded in prose
+    m = re.search(r'point"?\s*[:=]\s*\[\s*([\d.]+)\s*,\s*([\d.]+)', raw, re.I)
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
+def _parse_vision_index(raw: str) -> int:
+    """Pull an integer box index out of the model reply (-1 if none/invalid)."""
+    m = re.search(r'index"?\s*[:=]\s*(-?\d+)', raw, re.I)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"-?\d+", raw)
+    return int(m.group()) if m else -1
 
 
 def _paste_text(text: str):
@@ -999,7 +1052,10 @@ IDLE_DOT = "#3a3a55"
 IDLE_MSG = "Ready"
 ALWAYS_ON_MSG = "Always on — speak a command"
 METER_W, METER_H = 268, 6
-WIN_W, WIN_H = 300, 176
+WIN_W, WIN_H = 300, 360
+CHAT_BG = "#15152b"        # transcript panel (slightly darker than the window)
+YOU_COL = "#7aa2ff"        # what we heard you say
+BOT_COL = "#e8e8ff"        # what the assistant is doing
 TALK_KEYCODE = 50          # macOS keycode for the ` / ~ key (kVK_ANSI_Grave)
 
 
@@ -1020,12 +1076,23 @@ class App(tk.Tk):
         self._key_q: queue.Queue = queue.Queue()
         self._grave_down = False
         self._pending_audio: sr.AudioData | None = None
+        # chat transcript: a queue of (role, text) streamed one word at a time so
+        # the panel reads like a little conversation instead of a flickering line.
+        self._chat_queue: list[tuple[str, str]] = []
+        self._chat_streaming = False
+        self._chat_live = False        # a transient bottom line (Listening…/Working…)
+        # Worker threads must NOT touch tkinter (and `after()` from a non-main
+        # thread is dropped on macOS). They push UI updates onto this queue; the
+        # main thread drains it in _drain_ui. This is what makes the live
+        # narration actually appear instead of freezing on "Processing…".
+        self._ui_q: queue.Queue = queue.Queue()
         self._build_ui()
         self._reset_idle()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         hint = plat.permission_hints("voice_control")
         if hint:
             log("STARTUP", hint)
+        self._drain_ui()
         self._start_key_listener()
         if self._always_on:
             self.after(200, self._start_always_on)
@@ -1054,14 +1121,35 @@ class App(tk.Tk):
         self.mic_btn.bind("<ButtonPress-1>", lambda e: self._start_recording())
         self.mic_btn.bind("<ButtonRelease-1>", lambda e: self._stop_and_process())
 
-        # dynamic status line (the little "what it's doing" updates)
+        # thin live-state line (Listening / Ready) above the conversation
         self.status_var = tk.StringVar(value="")
         self.status_label = tk.Label(
             self, textvariable=self.status_var,
-            font=tkfont.Font(family="Helvetica", size=13),
+            font=tkfont.Font(family="Helvetica", size=10),
             fg=MUTED, bg=BG, wraplength=METER_W + 4, justify="left", anchor="w",
         )
-        self.status_label.pack(fill="x", padx=16, pady=(6, 6))
+        self.status_label.pack(fill="x", padx=16, pady=(4, 2))
+
+        # conversation transcript — streams what we heard and what we're doing
+        chat_wrap = tk.Frame(self, bg=CHAT_BG, highlightthickness=0)
+        chat_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        self._chat = tk.Text(
+            chat_wrap, height=8, width=1, wrap="word", bd=0,
+            bg=CHAT_BG, fg=BOT_COL, insertwidth=0, cursor="arrow",
+            font=tkfont.Font(family="Helvetica", size=11),
+            padx=8, pady=6, spacing1=2, spacing3=4, state="disabled",
+            highlightthickness=0, takefocus=0,
+        )
+        self._chat.pack(fill="both", expand=True)
+        self._chat.tag_configure("you", foreground=YOU_COL)
+        self._chat.tag_configure("you_lbl", foreground=MUTED,
+                                 font=tkfont.Font(family="Helvetica", size=9))
+        self._chat.tag_configure("bot", foreground=BOT_COL)
+        self._chat.tag_configure("ok", foreground=OK)
+        self._chat.tag_configure("warn", foreground=WARN)
+        self._chat.tag_configure("live", foreground=ACCENT,
+                                 font=tkfont.Font(family="Helvetica", size=11,
+                                                  slant="italic"))
 
         # thin audio meter (shows it's hearing you)
         self._meter_canvas = tk.Canvas(self, width=METER_W, height=METER_H,
@@ -1141,7 +1229,8 @@ class App(tk.Tk):
             self._always_listener.stop()
 
     def _on_always_utterance(self, audio: sr.AudioData):
-        self.after(0, lambda: self._submit_audio(audio, source="always-on"))
+        # Called from the listener's background thread → marshal via the queue.
+        self._post(lambda: self._submit_audio(audio, source="always-on"))
 
     def _poll_always_on_meter(self):
         if not self._always_on or not self._always_listener:
@@ -1166,17 +1255,108 @@ class App(tk.Tk):
         self._draw_meter(self._recorder.level)
         self.after(30, self._poll_meter)
 
+    # ── thread-safe UI marshalling ──────────────────────────────────────────────
+    # Any thread can call _post(fn); the main thread runs fn in _drain_ui. We do
+    # NOT use self.after() from worker threads — on macOS those callbacks are
+    # silently dropped, which is what froze the UI on "Processing…".
+    def _post(self, fn):
+        self._ui_q.put(fn)
+
+    def _drain_ui(self):
+        try:
+            while True:
+                fn = self._ui_q.get_nowait()
+                try:
+                    fn()
+                except Exception as e:
+                    log("UI", f"ui update failed: {e}", "ERROR")
+        except queue.Empty:
+            pass
+        self.after(40, self._drain_ui)
+
     def _set_status(self, msg: str, color: str = ACCENT):
-        # Marshal onto the main thread — safe to call from worker threads.
-        self.after(0, lambda: (self.status_var.set(msg),
-                               self.status_label.configure(fg=color)))
+        self._post(lambda: (self.status_var.set(msg),
+                            self.status_label.configure(fg=color)))
 
     def _set_trial_info(self, msg: str):
-        self.after(0, lambda: self._trial_var.set(msg))
+        self._post(lambda: self._trial_var.set(msg))
 
     def _set_indicator(self, state: str):
         color = {"idle": IDLE_DOT, "rec": REC, "busy": ACCENT, "done": OK}.get(state, IDLE_DOT)
-        self.after(0, lambda: self.mic_btn.configure(bg=color))
+        self._post(lambda: self.mic_btn.configure(bg=color))
+
+    # ── conversation transcript ─────────────────────────────────────────────────
+    # Worker threads narrate the pipeline by calling _chat_say(...). Messages are
+    # queued and streamed one word at a time on the main thread so the panel reads
+    # like a little chat (and stays tkinter-thread-safe).
+    def _chat_say(self, role: str, text: str):
+        """Append a permanent chat line. role: 'you','bot','ok','warn'."""
+        self._post(lambda: self._enqueue_chat(role, text))
+
+    def _chat_status(self, text: str):
+        """Show a transient, replaceable line at the bottom (Listening…/Working…).
+        Safe from any thread; superseded by the next permanent line."""
+        self._post(lambda: self._render_live(text))
+
+    def _render_live(self, text: str):
+        if self._chat_streaming:            # don't fight an animating message
+            return
+        self._chat.configure(state="normal")
+        if self._chat_live:                 # replace the previous live line
+            self._chat.delete("live", "end")
+        self._chat.mark_set("live", "end-1c")
+        self._chat.mark_gravity("live", "left")
+        sep = "" if self._chat.index("end-1c") == "1.0" else "\n"
+        self._chat.insert("end", sep + text, ("live",))
+        self._chat.configure(state="disabled")
+        self._chat.see("end")
+        self._chat_live = True
+
+    def _clear_live(self):
+        if self._chat_live:
+            self._chat.configure(state="normal")
+            self._chat.delete("live", "end")
+            self._chat.configure(state="disabled")
+            self._chat_live = False
+
+    def _enqueue_chat(self, role: str, text: str):
+        self._chat_queue.append((role, text))
+        if not self._chat_streaming:
+            self._pump_chat()
+
+    def _pump_chat(self):
+        if not self._chat_queue:
+            self._chat_streaming = False
+            return
+        self._chat_streaming = True
+        self._clear_live()                  # a real message replaces any live line
+        role, text = self._chat_queue.pop(0)
+        self._chat.configure(state="normal")
+        if self._chat.index("end-1c") != "1.0":
+            self._chat.insert("end", "\n")
+        if role == "you":
+            self._chat.insert("end", "You said  ", ("you_lbl",))
+        self._chat.configure(state="disabled")
+        self._stream_words(role, text.split(" "), 0)
+
+    def _stream_words(self, role: str, words: list[str], i: int):
+        if i >= len(words):
+            self.after(180, self._pump_chat)        # brief gap, then next message
+            return
+        self._chat.configure(state="normal")
+        chunk = words[i] + (" " if i < len(words) - 1 else "")
+        self._chat.insert("end", chunk, (role,))
+        self._chat.configure(state="disabled")
+        self._chat.see("end")
+        self.after(42, lambda: self._stream_words(role, words, i + 1))
+
+    def _chat_clear(self):
+        self._chat.configure(state="normal")
+        self._chat.delete("1.0", "end")
+        self._chat.configure(state="disabled")
+        self._chat_queue.clear()
+        self._chat_streaming = False
+        self._chat_live = False
 
     # ── global ` (backtick) push-to-talk ───────────────────────────────────────
     def _start_key_listener(self):
@@ -1288,6 +1468,7 @@ class App(tk.Tk):
         self._recording = True
         self._set_indicator("rec")
         self._set_status("● Listening…", REC)
+        self._chat_status("● Listening… (speak your command)")
         self._poll_meter()
 
     def _stop_and_process(self):
@@ -1341,6 +1522,7 @@ class App(tk.Tk):
         self.status_var.set(ALWAYS_ON_MSG if self._always_on else IDLE_MSG)
         self.status_label.configure(fg=OK if self._always_on else MUTED)
         self._trial_var.set("")
+        self._clear_live()              # drop any leftover "Listening…/Working…" line
         self._draw_meter(0)
 
     def _process(self, audio):
@@ -1355,28 +1537,33 @@ class App(tk.Tk):
             # ── Stage 1: speech-to-text ──────────────────────────────────────
             log("PIPELINE", "step 1/4 — transcribe audio")
             self._set_status("Transcribing…", ACCENT)
+            self._chat_status("Transcribing what you said…")
             try:
                 with Timer("TRANSCRIBE"):
                     command = transcribe(audio)
             except sr.UnknownValueError:
                 log("TRANSCRIBE", "Google STT could not understand the audio", "WARN")
                 self._set_status("Didn't catch that — try again", WARN)
+                self._chat_say("warn", "I didn't catch that — try again.")
                 _log_trial({"event": "unrecognized", "success": False})
                 self._schedule_reset()
                 return
             except sr.RequestError as e:
                 log("TRANSCRIBE", f"STT request error (network/timeout?): {e}", "ERROR")
                 self._set_status(f"Speech service error: {e}", REC)
+                self._chat_say("warn", f"Speech service error — {e}")
                 _log_trial({"event": "stt_request_error", "error": str(e), "success": False})
                 self._schedule_reset()
                 return
 
             trial["command"] = command
-            self._set_status(f'Heard: "{command}"', ACCENT)
+            self._set_status("Heard you", MUTED)
+            self._chat_say("you", command)
 
             if not _should_process_command(command):
                 log("PIPELINE", f"ignored non-command speech: {command!r}", "WARN")
                 self._set_status("Didn't catch a command — try again", WARN)
+                self._chat_say("warn", "That didn't sound like a command — try again.")
                 trial["ignored"] = True
                 trial["success"] = False
                 _log_trial(trial)
@@ -1387,10 +1574,12 @@ class App(tk.Tk):
             if handled:
                 if err:
                     self._set_status(err, WARN)
+                    self._chat_say("warn", err)
                     trial["error"] = err
                     trial["success"] = False
                 else:
                     self._set_status("Sent to Page Reader", OK)
+                    self._chat_say("ok", "Okay, I sent that to Page Reader to read aloud.")
                     trial["forwarded"] = "page_reader"
                     trial["success"] = True
                     self._set_trial_info("read command → page_reader")
@@ -1443,6 +1632,7 @@ class App(tk.Tk):
             trial["error"] = f"JSONDecodeError: {e}"
             trial["success"] = False
             self._set_status("AI gave a bad response — try again", WARN)
+            self._chat_say("warn", "The AI gave me a bad response — try again.")
             _log_trial(trial)
         except Exception as e:
             step = trial.get("_step")
@@ -1451,6 +1641,7 @@ class App(tk.Tk):
             trial["error"] = str(e)
             trial["success"] = False
             self._set_status(f"Couldn't do that{where} — {e}", REC)
+            self._chat_say("warn", self._failure_phrase(e))
             _log_trial(trial)
         finally:
             done.set()
@@ -1458,10 +1649,12 @@ class App(tk.Tk):
             log("PIPELINE", f"=== finished in {total:.2f}s ===")
             self._busy = False
             self._set_indicator("done" if trial.get("success") else "idle")
+            # These run on the worker thread, so schedule them via the main-thread
+            # queue (worker-thread self.after is unreliable on macOS).
             if self._always_on:
-                self.after(0, self._start_always_on)
-            self.after(300, self._run_pending_audio)
-            self.after(0, self._schedule_reset)     # reset to idle shortly after
+                self._post(self._start_always_on)
+            self._post(lambda: self.after(300, self._run_pending_audio))
+            self._post(self._schedule_reset)        # reset to idle shortly after
 
     def _run_subcommand(self, sub: str, label: str = "") -> dict:
         """Resolve ONE command and run it. Tries the shortcut/typing fast-path
@@ -1482,6 +1675,7 @@ class App(tk.Tk):
         else:
             log("RESOLVE", f"{sub!r} -> no shortcut, taking a screenshot")
             self._set_status(f"{label}Looking at the screen…", ACCENT)
+            self._chat_status("Looking at the screen…")
             elements = capture_screen_elements()
             ecount = len(elements)
             # Try matching the spoken title directly first (deterministic).
@@ -1499,13 +1693,49 @@ class App(tk.Tk):
                 self._set_status(f"{label}Asking AI…", ACCENT)
                 action = ask_groq(self.groq, sub, elements)
                 method = "vision-text"
+        # Tell the user what we're about to do, then do it.
+        self._chat_say("bot", self._plan_phrase(sub, action, desc))
         with Timer("EXECUTE"):
             result = execute_action(action)
         log("EXECUTE", f"result: {result}")
         self._set_status(f"{label}✓ {result}", OK)
+        self._chat_say("ok", self._result_phrase(action, result))
         return {"command": sub, "action": action, "result": result,
                 "method": method, "element_count": ecount,
                 "changed_page": _changes_page(action)}
+
+    # ── turning a command / action into a friendly sentence ─────────────────────
+    def _plan_phrase(self, sub: str, action: dict, desc: str | None) -> str:
+        """\"Okay, I'm going to …\" — what we're about to do, in plain words."""
+        if desc:                                    # matched a Chrome shortcut
+            return f"Okay — {desc[0].lower() + desc[1:]}."
+        act = (action or {}).get("action")
+        tgt = _extract_click_target(sub)
+        if act == "click" or _CLICK_INTENT.match(sub):
+            return (f"Okay, I'm going to click on {tgt}."
+                    if tgt else "Okay, I'm going to click that.")
+        if act in ("type", "paste") or re.match(r"(?i)\s*(type|search|go|enter)\b", sub):
+            return f"Okay, I'm going to {sub.strip()}."
+        if act == "scroll":
+            return "Okay, I'm going to scroll the page."
+        return f"Okay, I'm going to {sub.strip()}."
+
+    def _result_phrase(self, action: dict, result: str) -> str:
+        act = (action or {}).get("action")
+        if act == "click":
+            return "Done — clicked it."
+        if act in ("type", "paste"):
+            return "Done — typed it in."
+        if act == "scroll":
+            return "Done — scrolled."
+        return f"Done — {result}."
+
+    def _failure_phrase(self, e: Exception) -> str:
+        msg = str(e).lower()
+        if "no match" in msg or "nothing" in msg or "out of range" in msg:
+            return ("I couldn't find that on the screen, so I didn't click "
+                    "anything. Try naming it differently?")
+        return f"Sorry, I couldn't do that — {e}"
 
     def _start_watchdog(self, done: threading.Event, t0: float, warn_after: float = 20.0):
         """Print a terminal warning if the pipeline runs longer than warn_after.
