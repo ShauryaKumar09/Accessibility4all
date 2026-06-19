@@ -18,15 +18,17 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 VISION_CLICK_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TIMEOUT = 45
 
-PAGE_SUMMARY_PROMPT = """You are a screen reader. Read the VISIBLE TEXT in this Chrome screenshot aloud.
+PAGE_SUMMARY_PROMPT = """You help a blind user understand a Chrome web page quickly.
+
+Look at the screenshot and write a SHORT spoken summary of what matters most (2–5 sentences).
 
 Rules:
-- Output ONLY the actual words shown on the page (titles, paragraphs, labels, list items).
-- For feeds/lists: one item per sentence, using the exact title text.
-- For Google AI Overview: read the overview TEXT inside the box, not the label "AI Overview".
-- Do NOT summarize, interpret, or comment. Never say "this page shows" or "you have".
-- Skip browser tabs, address bar, and app menus.
-- Plain text only — no bullets, markdown, or labels like "Summary:"."""
+- Pick the important content only — main headline, key message, top results, or action needed.
+- Do NOT read the whole page word-for-word or list every visible line.
+- For feeds/search: briefly mention the top few relevant items, not everything.
+- For articles: summarize the topic and main takeaway in plain language.
+- Skip browser tabs, address bar, menus, ads, and sidebar clutter.
+- Plain spoken sentences only. No markdown, bullets, or labels like "Summary:"."""
 
 
 def image_to_data_url(img: Image.Image, max_size: int = 1280) -> str:
@@ -57,8 +59,8 @@ def summarize_page_image(client: Groq, img: Image.Image, context: str = "") -> s
                 {"type": "image_url", "image_url": {"url": data_url}},
             ],
         }],
-        temperature=0,
-        max_tokens=1024,
+        temperature=0.2,
+        max_tokens=512,
         timeout=GROQ_TIMEOUT,
     )
     text = (response.choices[0].message.content or "").strip()

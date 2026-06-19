@@ -10,7 +10,9 @@ import os
 import queue
 import re
 import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -86,8 +88,9 @@ def load_settings() -> dict:
             s["hotkeys"] = {**default_settings()["hotkeys"], **loaded.get("hotkeys", {})}
             if "hover_to_read" not in loaded and loaded.get("click_to_read"):
                 s["hover_to_read"] = True
-            if loaded.get("tts_rate", 70) >= 85:
-                s["tts_rate"] = 70
+            if loaded.get("tts_rate", 145) < 120:
+                s["tts_rate"] = 145
+                save_settings(s)
         except Exception as e:
             log(f"bad settings.json: {e} — using defaults")
     return s
@@ -183,38 +186,119 @@ def _match_section_local(query: str, elements: list[dict]) -> list[dict] | None:
 
 
 class Speaker:
-    """Background TTS queue with interruptible stop."""
+    """Killable TTS — Windows uses SAPI subprocess; macOS uses pyttsx3."""
 
     _STOP = object()
 
-    def __init__(self, rate: int = 180, volume: float = 1.0):
+    def __init__(self, rate: int = 70, volume: float = 1.0):
         self._rate = rate
         self._volume = volume
+        self._gen = 0
+        self._proc: subprocess.Popen | None = None
+        self._proc_lock = threading.Lock()
         self._q: queue.Queue = queue.Queue()
         self._engine = None
-        self._gen = 0
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = None
+        if plat.IS_WINDOWS:
+            self._thread = threading.Thread(target=self._run_windows, daemon=True)
+        else:
+            self._thread = threading.Thread(target=self._run_pyttsx3, daemon=True)
         self._thread.start()
 
-    def _run(self):
-        self._engine = pyttsx3.init()
-        self._engine.setProperty("rate", self._rate)
-        self._engine.setProperty("volume", self._volume)
+    def _sapi_rate(self) -> int:
+        """Map configured rate (~80–220) to Windows SAPI -10..10 (0 = normal)."""
+        return max(-10, min(10, int((self._rate - 150) / 12)))
+
+    def _kill_proc(self):
+        with self._proc_lock:
+            if self._proc is None:
+                return
+            try:
+                if self._proc.poll() is None:
+                    self._proc.kill()
+                    self._proc.wait(timeout=1)
+            except Exception:
+                pass
+            self._proc = None
+
+    def _speak_windows(self, text: str) -> bool:
+        """Start speech in a subprocess that stop() can kill immediately."""
+        self._kill_proc()
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8",
+        )
         try:
-            voices = self._engine.getProperty("voices") or []
-            for voice in voices:
-                name = (voice.name or "").lower()
-                vid = (voice.id or "").lower()
-                if any(tag in name or tag in vid for tag in ("zira", "david", "samantha", "karen")):
-                    self._engine.setProperty("voice", voice.id)
-                    break
-        except Exception:
-            pass
+            tmp.write(text)
+            tmp.close()
+            path = tmp.name.replace("\\", "/")
+            rate = self._sapi_rate()
+            ps = (
+                f"$t = Get-Content -LiteralPath '{path}' -Raw -Encoding UTF8; "
+                "Add-Type -AssemblyName System.Speech; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                f"$s.Rate = {rate}; "
+                "$s.Speak($t); "
+                f"Remove-Item -LiteralPath '{path}' -Force"
+            )
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            with self._proc_lock:
+                self._proc = subprocess.Popen(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                    creationflags=flags,
+                )
+            return True
+        except Exception as e:
+            log(f"TTS spawn error: {e}")
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+            return False
+
+    def _run_windows(self):
         while True:
             item = self._q.get()
             if item is self._STOP:
                 break
-            if item is None:
+            if not item:
+                continue
+            gen = self._gen
+            if not self._speak_windows(item):
+                continue
+            while True:
+                with self._proc_lock:
+                    proc = self._proc
+                if proc is None:
+                    break
+                if proc.poll() is not None:
+                    break
+                if gen != self._gen:
+                    self._kill_proc()
+                    break
+                time.sleep(0.05)
+
+    def _init_pyttsx3(self):
+        eng = pyttsx3.init()
+        eng.setProperty("rate", self._rate)
+        eng.setProperty("volume", self._volume)
+        try:
+            for voice in eng.getProperty("voices") or []:
+                name = (voice.name or "").lower()
+                vid = (voice.id or "").lower()
+                if any(t in name or t in vid for t in ("zira", "david", "samantha", "karen")):
+                    eng.setProperty("voice", voice.id)
+                    break
+        except Exception:
+            pass
+        return eng
+
+    def _run_pyttsx3(self):
+        self._engine = self._init_pyttsx3()
+        while True:
+            item = self._q.get()
+            if item is self._STOP:
+                break
+            if not item:
                 continue
             gen = self._gen
             try:
@@ -222,9 +306,14 @@ class Speaker:
                 self._engine.runAndWait()
             except Exception as e:
                 log(f"TTS error: {e}")
+                try:
+                    self._engine = self._init_pyttsx3()
+                except Exception:
+                    pass
             if gen != self._gen:
                 try:
                     self._engine.stop()
+                    self._engine = self._init_pyttsx3()
                 except Exception:
                     pass
 
@@ -241,8 +330,15 @@ class Speaker:
             if line.strip() and gen == self._gen:
                 self._q.put(line.strip())
 
+    def speak_one(self, text: str):
+        """Stop everything and speak a single line (hover)."""
+        self.stop()
+        if text.strip():
+            self._q.put(text.strip())
+
     def stop(self):
         self._gen += 1
+        self._kill_proc()
         try:
             while True:
                 self._q.get_nowait()
@@ -255,6 +351,7 @@ class Speaker:
                 pass
 
     def shutdown(self):
+        self.stop()
         self._q.put(self._STOP)
 
 
@@ -269,6 +366,7 @@ class PageReaderApp(tk.Tk):
         self._hover_listener = None
         self._hover_after_id = None
         self._pending_hover: tuple[int, int] | None = None
+        self._hover_gen = 0
         self._last_hover_text = ""
         self._last_hover_pos: tuple[int, int] | None = None
         self._capture_listener = None
@@ -277,7 +375,7 @@ class PageReaderApp(tk.Tk):
         self._groq: Groq | None = None
 
         self._speaker = Speaker(
-            rate=int(self.settings.get("tts_rate", 70)),
+            rate=int(self.settings.get("tts_rate", 145)),
             volume=float(self.settings.get("tts_volume", 1.0)),
         )
 
@@ -497,14 +595,19 @@ class PageReaderApp(tk.Tk):
         log("hover-to-read enabled")
 
     def _schedule_hover_read(self, x: int, y: int):
-        moved = self._last_hover_pos is None or abs(x - self._last_hover_pos[0]) > 20 or abs(y - self._last_hover_pos[1]) > 20
+        moved = (
+            self._last_hover_pos is None
+            or abs(x - self._last_hover_pos[0]) > 6
+            or abs(y - self._last_hover_pos[1]) > 6
+        )
         if moved:
             self._speaker.stop()
+            self._hover_gen += 1
             self._last_hover_text = ""
         self._pending_hover = (x, y)
         if self._hover_after_id:
             self.after_cancel(self._hover_after_id)
-        delay = int(self.settings.get("hover_delay_ms", 750))
+        delay = int(self.settings.get("hover_delay_ms", 200))
         self._hover_after_id = self.after(delay, self._trigger_hover_read)
 
     def _trigger_hover_read(self):
@@ -513,7 +616,8 @@ class PageReaderApp(tk.Tk):
             return
         x, y = self._pending_hover
         self._pending_hover = None
-        threading.Thread(target=self._do_hover_read, args=(x, y), daemon=True).start()
+        gen = self._hover_gen
+        threading.Thread(target=self._do_hover_read, args=(x, y, gen), daemon=True).start()
 
     def _start_bus_listener(self):
         def _poll():
@@ -599,6 +703,7 @@ class PageReaderApp(tk.Tk):
         self._set_status(f"Read {len(lines)} lines from Chrome", OK)
 
     def cmd_stop(self):
+        self._hover_gen += 1
         self._speaker.stop()
         self._last_hover_text = ""
         if self._hover_after_id:
@@ -636,26 +741,35 @@ class PageReaderApp(tk.Tk):
         except Exception as e:
             self._set_status(f"Error: {e}", REC)
 
-    def _do_hover_read(self, x: int, y: int):
+    def _do_hover_read(self, x: int, y: int, gen: int):
         try:
+            if gen != self._hover_gen:
+                return
             region = screen_ocr.region_around_point(x, y, pad_w=720, pad_h=280)
             elements = screen_ocr.capture_screen_elements(
                 log_fn=self._ocr_log, region=region)
+            if gen != self._hover_gen:
+                return
             el = screen_ocr.elements_at_point(elements, x, y)
             if not el:
                 return
             text = el["text"].strip()
-            if not text or text == self._last_hover_text:
+            if not text:
+                return
+            if text == self._last_hover_text and self._last_hover_pos:
+                if abs(x - self._last_hover_pos[0]) <= 6 and abs(y - self._last_hover_pos[1]) <= 6:
+                    return
+            if gen != self._hover_gen:
                 return
             self._last_hover_text = text
             self._last_hover_pos = (x, y)
             self._remember_region([el])
-            self._speaker.stop()
-            self._speaker.speak_lines([text])
+            self._speaker.speak_one(text)
             preview = text if len(text) <= 48 else text[:45] + "…"
             self._set_status(f"Hover: {preview}", OK)
         except Exception as e:
-            self._set_status(f"Error: {e}", REC)
+            if gen == self._hover_gen:
+                self._set_status(f"Error: {e}", REC)
 
     def cmd_read_section(self, query: str):
         if not self.settings.get("voice_guided", True):
