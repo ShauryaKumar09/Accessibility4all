@@ -18,17 +18,15 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 VISION_CLICK_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_TIMEOUT = 45
 
-PAGE_SUMMARY_PROMPT = """You are a screen reader for a blind user looking at Google Chrome.
-
-Your job is to read aloud the VISIBLE TEXT on the page — nothing more.
+PAGE_SUMMARY_PROMPT = """You are a screen reader. Read the VISIBLE TEXT in this Chrome screenshot aloud.
 
 Rules:
-- Quote or closely paraphrase the actual on-screen text only (titles, labels, messages, headings, body copy).
-- For lists/feeds (e.g. YouTube): read each visible item title on its own short line, top to bottom. Example: "Video title one. Video title two."
-- Do NOT summarize, interpret, categorize, or add commentary. Never say things like "your YouTube has gaming videos" or "this page shows".
-- Do NOT describe what the user "has" or what the page "is about". Just read what is written.
-- Skip browser chrome (tabs bar, address bar, menus) unless the user would need that exact text.
-- Plain sentences only. No markdown, bullets, JSON, or "Summary:" labels."""
+- Output ONLY the actual words shown on the page (titles, paragraphs, labels, list items).
+- For feeds/lists: one item per sentence, using the exact title text.
+- For Google AI Overview: read the overview TEXT inside the box, not the label "AI Overview".
+- Do NOT summarize, interpret, or comment. Never say "this page shows" or "you have".
+- Skip browser tabs, address bar, and app menus.
+- Plain text only — no bullets, markdown, or labels like "Summary:"."""
 
 
 def image_to_data_url(img: Image.Image, max_size: int = 1280) -> str:
@@ -48,7 +46,7 @@ def summarize_page_image(client: Groq, img: Image.Image, context: str = "") -> s
     data_url = image_to_data_url(img)
     user_text = PAGE_SUMMARY_PROMPT
     if context.strip():
-        user_text += f"\n\nThe user asked to hear: {context.strip()}"
+        user_text += f"\n\nFocus only on text related to: {context.strip()}"
 
     response = client.chat.completions.create(
         model=VISION_MODEL,

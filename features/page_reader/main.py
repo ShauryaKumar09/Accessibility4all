@@ -37,15 +37,23 @@ SETTINGS_FILE = FEATURE_DIR / "settings.json"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT = 30
 MAX_ELEMENTS = 120
-READ_SECTION_PROMPT = """You help a blind user hear the right part of the screen read aloud.
-You receive a numbered list of visible text lines from OCR and a spoken request about what to read.
+READ_SECTION_PROMPT = """You pick which OCR lines to read aloud for a blind user.
 
-Return ONLY valid JSON — no markdown, no explanation:
-{"indices": [<int>, ...]}
+You get a numbered list of EXACT text lines from the screen and what the user asked to hear.
 
-Pick one or more consecutive line indices that best match what the user asked to hear.
-If nothing matches, return {"indices": []}.
-"""
+Return ONLY JSON: {"indices": [<int>, ...]}
+
+Rules:
+- Pick lines whose text actually matches the request (same topic, heading, or keywords).
+- Return ALL consecutive matching lines as one block (include lines directly above/below the heading).
+- Use only indices from the list. If nothing matches, return {"indices": []}.
+- Do not invent text — only pick indices."""
+
+_SECTION_SKIP = re.compile(
+    r"^(home|shorts|subscriptions|explore|library|history|sign in|menu|search|"
+    r"images?|videos?|news|shopping|maps|more|tools|all|about|ai overview)$",
+    re.I,
+)
 
 BG = "#1a1a2e"
 CARD = "#23233f"
@@ -137,8 +145,45 @@ def format_hotkey_from_event(key, modifiers: set) -> str:
     return "+".join(parts)
 
 
+def _norm_words(s: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", s.lower()) if len(w) > 2]
+
+
+def _match_section_local(query: str, elements: list[dict]) -> list[dict] | None:
+    """Fuzzy match query to on-screen lines; expand to nearby paragraph lines."""
+    qwords = _norm_words(query)
+    if not qwords:
+        return None
+    best_i, best_score = -1, 0.0
+    for i, e in enumerate(elements):
+        t = e.get("text", "")
+        if _SECTION_SKIP.match(t.strip()):
+            continue
+        words = _norm_words(t)
+        if not words:
+            continue
+        hits = sum(1 for w in qwords if any(w in tw or tw in w for tw in words))
+        score = hits / len(qwords)
+        if any(w in t.lower() for w in qwords):
+            score += 0.25
+        if score > best_score:
+            best_score, best_i = score, i
+    if best_i < 0 or best_score < 0.45:
+        return None
+    ordered = sorted(elements, key=lambda e: (e["y0"], e["x0"]))
+    seed = elements[best_i]
+    si = next(i for i, e in enumerate(ordered) if e is seed or e["text"] == seed["text"])
+    lo, hi = si, si
+    line_h = max(ordered[si]["y1"] - ordered[si]["y0"], 14)
+    while lo > 0 and ordered[lo]["y0"] - ordered[lo - 1]["y1"] <= line_h * 2.5:
+        lo -= 1
+    while hi + 1 < len(ordered) and ordered[hi + 1]["y0"] - ordered[hi]["y1"] <= line_h * 2.5:
+        hi += 1
+    return ordered[lo:hi + 1]
+
+
 class Speaker:
-    """Background TTS queue with stop support."""
+    """Background TTS queue with interruptible stop."""
 
     _STOP = object()
 
@@ -147,6 +192,7 @@ class Speaker:
         self._volume = volume
         self._q: queue.Queue = queue.Queue()
         self._engine = None
+        self._gen = 0
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -169,14 +215,18 @@ class Speaker:
             if item is self._STOP:
                 break
             if item is None:
-                if self._engine:
-                    self._engine.stop()
                 continue
+            gen = self._gen
             try:
                 self._engine.say(item)
                 self._engine.runAndWait()
             except Exception as e:
                 log(f"TTS error: {e}")
+            if gen != self._gen:
+                try:
+                    self._engine.stop()
+                except Exception:
+                    pass
 
     def configure(self, rate: int, volume: float):
         self._rate, self._volume = rate, volume
@@ -186,12 +236,23 @@ class Speaker:
 
     def speak_lines(self, lines: list[str]):
         self.stop()
+        gen = self._gen
         for line in lines:
-            if line.strip():
+            if line.strip() and gen == self._gen:
                 self._q.put(line.strip())
 
     def stop(self):
-        self._q.put(None)
+        self._gen += 1
+        try:
+            while True:
+                self._q.get_nowait()
+        except queue.Empty:
+            pass
+        if self._engine:
+            try:
+                self._engine.stop()
+            except Exception:
+                pass
 
     def shutdown(self):
         self._q.put(self._STOP)
@@ -209,6 +270,7 @@ class PageReaderApp(tk.Tk):
         self._hover_after_id = None
         self._pending_hover: tuple[int, int] | None = None
         self._last_hover_text = ""
+        self._last_hover_pos: tuple[int, int] | None = None
         self._capture_listener = None
         self._capture_target: str | None = None
         self._modifiers: set = set()
@@ -435,10 +497,14 @@ class PageReaderApp(tk.Tk):
         log("hover-to-read enabled")
 
     def _schedule_hover_read(self, x: int, y: int):
+        moved = self._last_hover_pos is None or abs(x - self._last_hover_pos[0]) > 20 or abs(y - self._last_hover_pos[1]) > 20
+        if moved:
+            self._speaker.stop()
+            self._last_hover_text = ""
         self._pending_hover = (x, y)
         if self._hover_after_id:
             self.after_cancel(self._hover_after_id)
-        delay = int(self.settings.get("hover_delay_ms", 500))
+        delay = int(self.settings.get("hover_delay_ms", 750))
         self._hover_after_id = self.after(delay, self._trigger_hover_read)
 
     def _trigger_hover_read(self):
@@ -534,6 +600,11 @@ class PageReaderApp(tk.Tk):
 
     def cmd_stop(self):
         self._speaker.stop()
+        self._last_hover_text = ""
+        if self._hover_after_id:
+            self.after_cancel(self._hover_after_id)
+            self._hover_after_id = None
+        self._pending_hover = None
         self._set_status("Stopped", OK)
 
     def cmd_read_last(self):
@@ -577,6 +648,7 @@ class PageReaderApp(tk.Tk):
             if not text or text == self._last_hover_text:
                 return
             self._last_hover_text = text
+            self._last_hover_pos = (x, y)
             self._remember_region([el])
             self._speaker.stop()
             self._speaker.speak_lines([text])
@@ -595,16 +667,23 @@ class PageReaderApp(tk.Tk):
     def _do_read_section(self, query: str):
         try:
             elements = screen_ocr.capture_chrome_elements(log_fn=self._ocr_log)
-            shown = elements[:MAX_ELEMENTS]
-            if not shown:
+            if not elements:
                 self._set_status("No text on screen", WARN)
                 return
-            indices = self._ask_groq_section(query, shown)
-            if not indices:
+            picked = _match_section_local(query, elements)
+            if picked:
+                log(f"section local match: {len(picked)} lines for {query!r}")
+            else:
+                shown = elements[:MAX_ELEMENTS]
+                indices = self._ask_groq_section(query, shown)
+                if not indices:
+                    self._set_status("No matching section found", WARN)
+                    return
+                picked = [shown[i] for i in indices if 0 <= i < len(shown)]
+            texts = [e["text"] for e in picked]
+            if not texts:
                 self._set_status("No matching section found", WARN)
                 return
-            picked = [shown[i] for i in indices if 0 <= i < len(shown)]
-            texts = [e["text"] for e in picked]
             self._remember_region(picked)
             self._set_status("Reading section…", ACCENT)
             self._speaker.speak_lines(texts)
