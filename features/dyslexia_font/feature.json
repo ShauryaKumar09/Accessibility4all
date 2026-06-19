@@ -1,0 +1,7 @@
+{
+  "name": "Dyslexia Font",
+  "description": "Applies dyslexia-friendly font settings to websites and offers opt-in Windows app font substitution.",
+  "entry": "main.py",
+  "version": "0.1.0",
+  "author": "Accessibility4all"
+}
