@@ -812,15 +812,53 @@ def _extract_click_target(command: str) -> str | None:
                   "", rest)
     return rest.strip(" '\"") or None
 
-def _thumbnail_point(title: dict, elements: list[dict], screen_h: int) -> tuple[int, int]:
-    """Pick a click point on the THUMBNAIL above a video's title line.
+# A video's duration badge ("12:34", "1:00:00") is overlaid on the thumbnail's
+# bottom-right corner — a reliable anchor for WHERE the thumbnail actually is,
+# in BOTH YouTube layouts: the home grid (thumbnail ABOVE the title) and the
+# search/list view (thumbnail to the LEFT). Aiming "above the title" only works
+# for the grid, so on a results page we'd miss the thumbnail entirely.
+_DURATION_RE = re.compile(r"^\s*\d{1,2}:\d{2}(?::\d{2})?\s*$")
 
-    A video's title is a link to the video, but it sits right above the channel
-    name — clicking low can hit the channel and open the wrong page. The
-    thumbnail (directly above the title) always opens the video, so we aim there.
-    We estimate the thumbnail's height from the gap up to the nearest text above
-    the title's column; if there's no clear gap we fall back to a fixed offset.
-    """
+def _thumbnail_badge_point(title: dict, elements: list[dict]) -> tuple[int, int] | None:
+    """Click point on a video's thumbnail, found via its duration badge.
+
+    Picks the badge nearest the title within a plausible window (above it in the
+    grid, or up-and-left of it in a list), then nudges up-and-left of the badge
+    so the click lands well inside the thumbnail image (which extends up and to
+    the left of its bottom-right corner). Returns None when no badge is found
+    (e.g. Shorts, live), so the caller can fall back to the above-title estimate."""
+    tx0, tx1 = title["x0"], title["x1"]
+    ttop, tbot = title["y0"], title["y1"]
+    best, best_d = None, None
+    for e in elements:
+        if not _DURATION_RE.match(e.get("text") or ""):
+            continue
+        bx, by = e.get("x", 0), e.get("y", 0)
+        if by > tbot + 30 or by < ttop - 320:   # wrong row (below / far above)
+            continue
+        if bx > tx1 + 20:                        # right of the title — unrelated
+            continue
+        d = (bx - tx0) ** 2 + (by - ttop) ** 2
+        if best_d is None or d < best_d:
+            best, best_d = e, d
+    if best is None:
+        return None
+    bw = max(40, best["x1"] - best["x0"])        # nudge scaled to the badge size
+    return best["x"] - int(bw * 1.4), best["y"] - 45
+
+
+def _thumbnail_point(title: dict, elements: list[dict], screen_h: int) -> tuple[int, int]:
+    """Pick a click point on a video's THUMBNAIL (never the channel/metadata).
+
+    Prefers the duration-badge anchor (works for both the grid and list layouts);
+    falls back to estimating the thumbnail directly above the title from the gap
+    to the nearest text above its column. The fallback assumes a vertical grid
+    layout, so the badge path is what keeps list/search results accurate."""
+    badge = _thumbnail_badge_point(title, elements)
+    if badge is not None:
+        bx, by = badge
+        by = max(by, int(screen_h * 0.10))       # never up in the tab bar
+        return bx, max(by, 1)
     tx0, tx1, top = title["x0"], title["x1"], title["y0"]
     cx = (tx0 + tx1) // 2
     above_bottom = None
@@ -1017,6 +1055,41 @@ def match_click_target(command: str, elements: list[dict]) -> dict | None:
 def _looks_clicky(command: str) -> bool:
     """Is this a 'click/select an element' command (so we should use vision)?"""
     return bool(re.search(rf"(?i)\b(?:{_CLICK_VERB})\b", command))
+
+
+# Sites where pressing "/" focuses the on-page search box. This is FAR more
+# reliable than locating the field by pixel: the input is often empty and its
+# placeholder ("Search") is faint gray text that OCR misses (e.g. YouTube dark
+# mode), so we'd otherwise fall back to an imprecise vision point that can land
+# just above the bar and miss it entirely. The "/" shortcut needs no screenshot,
+# no model call, and always hits the real input. Matched as a domain substring.
+_SLASH_SEARCH_SITES = (
+    "youtube.com", "github.com", "gitlab.com", "twitter.com", "x.com",
+    "reddit.com", "twitch.tv", "stackoverflow.com", "wikipedia.org",
+)
+
+def _slash_search_url(url: str) -> bool:
+    """True if `url`'s site focuses its search box when "/" is pressed."""
+    low = (url or "").lower()
+    return any(d in low for d in _SLASH_SEARCH_SITES)
+
+def detect_slash_search_site(elements: list[dict]) -> bool:
+    """Detect a "/"-search site from the address-bar domain in the OCR.
+
+    Authoritative source is Chrome's URL (`get_chrome_state`), but that needs the
+    Automation permission and may be unavailable; the address bar is reliably
+    OCR'd (high-contrast), so we also scan the top strip of the page for a known
+    domain. Restricting to the top avoids a false hit from a domain printed in
+    page content (which would make "/" type a stray slash on the wrong site)."""
+    state = plat.get_chrome_state(log_fn=log)
+    if state and _slash_search_url(state.get("url", "")):
+        return True
+    if state and state.get("url"):
+        return False                    # we KNOW the URL and it's not a match
+    screen_h = pyautogui.size()[1]
+    top = " ".join((e.get("text") or "") for e in elements
+                   if e.get("y", 0) < screen_h * 0.14).lower()
+    return any(d in top for d in _SLASH_SEARCH_SITES)
 
 
 # A page's OWN search box, located from OCR so "search X" can stay on the site
@@ -1962,6 +2035,16 @@ class App(tk.Tk):
         self._chat_status("Looking for the search box on this page…")
         elements = capture_screen_elements()
         ecount = len(elements)
+
+        # 0) Most reliable: on sites where "/" focuses the search box (YouTube,
+        #    GitHub, Reddit, …), just press it. The field is often empty and its
+        #    placeholder OCR-invisible, so pixel-locating it lands above the bar
+        #    and misses — the keystroke always hits the real input.
+        if detect_slash_search_site(elements):
+            log("RESOLVE", "site search via '/' shortcut (focuses page search box)")
+            action = _seq({"action": "hotkey", "keys": ["/"]},
+                          _type(query, enter=True))
+            return action, "site-search-key", ecount, f"search this page for {query!r}"
 
         # 1) Fast path: a readable "Search"/"Search <site>" placeholder in the OCR.
         box = find_search_box(elements)
