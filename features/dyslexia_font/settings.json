@@ -1,0 +1,15 @@
+{
+  "website_enabled": true,
+  "font_family": "OpenDyslexic",
+  "letter_spacing": 0.03,
+  "line_height": 1.55,
+  "font_weight": "inherit",
+  "windows_targets": [
+    "Arial",
+    "Calibri",
+    "Segoe UI",
+    "Tahoma",
+    "Times New Roman",
+    "Verdana"
+  ]
+}
