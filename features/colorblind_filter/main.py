@@ -12,9 +12,7 @@ from __future__ import annotations
 import json
 import os
 import signal
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 import tkinter as tk
@@ -94,30 +92,25 @@ def is_filter_active() -> bool:
     return bool(_read_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active"))
 
 
-def _toggle_live():
-    """Same effect as the Win+Ctrl+C shortcut — applies the current registry state."""
-    subprocess.run(["atbroker.exe", "/colorfiltershortcut"], check=False)
-    time.sleep(0.2)
-
-
 def set_filter(enabled: bool, filter_type: int):
+    """Write the registry state directly — the only reliable mechanism.
+
+    atbroker.exe /colorfiltershortcut (simulating the Win+Ctrl+C hotkey) was
+    tried first, but it's a TOGGLE relative to the OS's own internal state,
+    and it measurably fails silently in some environments (non-zero exit, no
+    error text, Active left unchanged) — so a "successful" call is
+    indistinguishable from one that just undid our own write. Direct registry
+    write is idempotent and verifiable; the tradeoff is the OS may need a
+    lock/unlock (Win+L) or sign-out to visually refresh instantly.
+    """
     if not plat.IS_WINDOWS:
         raise RuntimeError("Color filters are only available on Windows.")
     import winreg
 
-    current_active = is_filter_active()
-    current_type = _read_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType")
-
-    if enabled:
-        if current_active and current_type != filter_type:
-            _toggle_live()          # off first so a type change is picked up cleanly
-            current_active = False
-        _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType", filter_type)
-        if not current_active:
-            _toggle_live()
-    else:
-        if current_active:
-            _toggle_live()
+    _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType", filter_type)
+    _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active", 1 if enabled else 0)
+    if is_filter_active() != enabled:
+        raise RuntimeError("Registry updated but Windows did not confirm the new state.")
 
 
 class ColorblindFilterApp(tk.Tk):
@@ -179,7 +172,9 @@ class ColorblindFilterApp(tk.Tk):
             self.settings["enabled"] = self._enabled_var.get()
             self.settings["filter_name"] = self._filter_var.get()
             save_settings(self.settings)
-            self.status_var.set("Applied." if self._enabled_var.get() else "Filter off.")
+            self.status_var.set(
+                "Applied. If the screen doesn't change instantly, lock and unlock (Win+L)."
+                if self._enabled_var.get() else "Filter off.")
             log(f"filter set: enabled={self._enabled_var.get()} type={self._filter_var.get()}")
         except Exception as e:
             log(f"apply failed: {e}")

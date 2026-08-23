@@ -148,6 +148,7 @@ class Speaker:
         while True:
             item = self._q.get()
             if item is self._STOP:
+                self._loop.close()
                 break
             if not item:
                 continue
@@ -190,6 +191,7 @@ class Speaker:
     def shutdown(self):
         self.stop()
         self._q.put(self._STOP)
+        self._thread.join(timeout=2)
 
 
 class SummarizerApp(tk.Tk):
