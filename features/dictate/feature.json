@@ -1,0 +1,7 @@
+{
+  "name": "Dictate",
+  "description": "Hold a hotkey to speak, release to type the transcribed text into whatever field has focus.",
+  "entry": "main.py",
+  "version": "0.1.0",
+  "author": "Accessibility4all"
+}

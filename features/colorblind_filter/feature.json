@@ -1,0 +1,7 @@
+{
+  "name": "Color Blind Filter",
+  "description": "Toggles Windows' built-in system-wide color filter (Deuteranopia, Protanopia, Tritanopia, Grayscale, Invert).",
+  "entry": "main.py",
+  "version": "0.2.0",
+  "author": "Accessibility4all"
+}

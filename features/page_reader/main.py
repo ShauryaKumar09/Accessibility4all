@@ -5,19 +5,21 @@ Runs as its own process when toggled ON in the hub. See features/README.md.
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import os
 import queue
 import re
 import signal
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
 
-import pyttsx3
+import edge_tts
+import sounddevice as sd
+import soundfile as sf
 import tkinter as tk
 from dotenv import load_dotenv
 from groq import Groq
@@ -185,77 +187,39 @@ def _match_section_local(query: str, elements: list[dict]) -> list[dict] | None:
     return ordered[lo:hi + 1]
 
 
+DEFAULT_TTS_VOICE = "en-US-AvaMultilingualNeural"
+
+
 class Speaker:
-    """Killable TTS — Windows uses SAPI subprocess; macOS uses pyttsx3."""
+    """Killable TTS — neural voices via edge-tts, played through sounddevice."""
 
     _STOP = object()
 
-    def __init__(self, rate: int = 70, volume: float = 1.0):
+    def __init__(self, rate: int = 145, volume: float = 1.0, voice: str = DEFAULT_TTS_VOICE):
         self._rate = rate
         self._volume = volume
+        self._voice = voice
         self._gen = 0
-        self._proc: subprocess.Popen | None = None
-        self._proc_lock = threading.Lock()
         self._q: queue.Queue = queue.Queue()
-        self._engine = None
-        self._thread = None
-        if plat.IS_WINDOWS:
-            self._thread = threading.Thread(target=self._run_windows, daemon=True)
-        else:
-            self._thread = threading.Thread(target=self._run_pyttsx3, daemon=True)
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def _sapi_rate(self) -> int:
-        """Map configured rate (~80–220) to Windows SAPI -10..10 (0 = normal)."""
-        return max(-10, min(10, int((self._rate - 150) / 12)))
+    def _edge_rate(self) -> str:
+        """Map configured rate (~80-220 wpm) to edge-tts percent (0% = ~175 wpm)."""
+        pct = max(-50, min(50, round((self._rate - 175) / 175 * 100)))
+        return f"{pct:+d}%"
 
-    def _kill_proc(self):
-        with self._proc_lock:
-            if self._proc is None:
-                return
-            try:
-                if self._proc.poll() is None:
-                    self._proc.kill()
-                    self._proc.wait(timeout=1)
-            except Exception:
-                pass
-            self._proc = None
+    async def _synth(self, text: str) -> bytes:
+        communicate = edge_tts.Communicate(text, voice=self._voice, rate=self._edge_rate())
+        buf = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                buf.extend(chunk["data"])
+        return bytes(buf)
 
-    def _speak_windows(self, text: str) -> bool:
-        """Start speech in a subprocess that stop() can kill immediately."""
-        self._kill_proc()
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8",
-        )
-        try:
-            tmp.write(text)
-            tmp.close()
-            path = tmp.name.replace("\\", "/")
-            rate = self._sapi_rate()
-            ps = (
-                f"$t = Get-Content -LiteralPath '{path}' -Raw -Encoding UTF8; "
-                "Add-Type -AssemblyName System.Speech; "
-                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                f"$s.Rate = {rate}; "
-                "$s.Speak($t); "
-                f"Remove-Item -LiteralPath '{path}' -Force"
-            )
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            with self._proc_lock:
-                self._proc = subprocess.Popen(
-                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
-                    creationflags=flags,
-                )
-            return True
-        except Exception as e:
-            log(f"TTS spawn error: {e}")
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-            return False
-
-    def _run_windows(self):
+    def _run(self):
+        asyncio.set_event_loop(self._loop)
         while True:
             item = self._q.get()
             if item is self._STOP:
@@ -263,65 +227,29 @@ class Speaker:
             if not item:
                 continue
             gen = self._gen
-            if not self._speak_windows(item):
+            try:
+                mp3 = self._loop.run_until_complete(self._synth(item))
+                data, sr = sf.read(io.BytesIO(mp3), dtype="float32")
+            except Exception as e:
+                log(f"TTS synth error: {e}")
                 continue
+            if gen != self._gen or data is None or len(data) == 0:
+                continue
+            data = data * self._volume
+            sd.play(data, sr)
             while True:
-                with self._proc_lock:
-                    proc = self._proc
-                if proc is None:
-                    break
-                if proc.poll() is not None:
+                stream = sd.get_stream()
+                if stream is None or not stream.active:
                     break
                 if gen != self._gen:
-                    self._kill_proc()
+                    sd.stop()
                     break
-                time.sleep(0.05)
+                time.sleep(0.03)
 
-    def _init_pyttsx3(self):
-        eng = pyttsx3.init()
-        eng.setProperty("rate", self._rate)
-        eng.setProperty("volume", self._volume)
-        try:
-            for voice in eng.getProperty("voices") or []:
-                name = (voice.name or "").lower()
-                vid = (voice.id or "").lower()
-                if any(t in name or t in vid for t in ("zira", "david", "samantha", "karen")):
-                    eng.setProperty("voice", voice.id)
-                    break
-        except Exception:
-            pass
-        return eng
-
-    def _run_pyttsx3(self):
-        self._engine = self._init_pyttsx3()
-        while True:
-            item = self._q.get()
-            if item is self._STOP:
-                break
-            if not item:
-                continue
-            gen = self._gen
-            try:
-                self._engine.say(item)
-                self._engine.runAndWait()
-            except Exception as e:
-                log(f"TTS error: {e}")
-                try:
-                    self._engine = self._init_pyttsx3()
-                except Exception:
-                    pass
-            if gen != self._gen:
-                try:
-                    self._engine.stop()
-                    self._engine = self._init_pyttsx3()
-                except Exception:
-                    pass
-
-    def configure(self, rate: int, volume: float):
+    def configure(self, rate: int, volume: float, voice: str | None = None):
         self._rate, self._volume = rate, volume
-        if self._engine:
-            self._engine.setProperty("rate", rate)
-            self._engine.setProperty("volume", volume)
+        if voice:
+            self._voice = voice
 
     def speak_lines(self, lines: list[str]):
         self.stop()
@@ -338,17 +266,12 @@ class Speaker:
 
     def stop(self):
         self._gen += 1
-        self._kill_proc()
+        sd.stop()
         try:
             while True:
                 self._q.get_nowait()
         except queue.Empty:
             pass
-        if self._engine:
-            try:
-                self._engine.stop()
-            except Exception:
-                pass
 
     def shutdown(self):
         self.stop()
@@ -377,6 +300,7 @@ class PageReaderApp(tk.Tk):
         self._speaker = Speaker(
             rate=int(self.settings.get("tts_rate", 145)),
             volume=float(self.settings.get("tts_volume", 1.0)),
+            voice=self.settings.get("tts_voice", DEFAULT_TTS_VOICE),
         )
 
         self._build_ui()
@@ -644,6 +568,10 @@ class PageReaderApp(tk.Tk):
             text = entry.get("text", "")
             if text:
                 self.cmd_read_section(text)
+        elif cmd == "ask_question":
+            text = entry.get("text", "")
+            if text:
+                self.cmd_ask_question(text)
 
     def _remember_region(self, elements: list[dict]):
         if not elements:
@@ -804,6 +732,32 @@ class PageReaderApp(tk.Tk):
             self._set_status("Done", OK)
         except Exception as e:
             log(f"read_section failed: {e}")
+            self._set_status(f"Error: {e}", REC)
+
+    def cmd_ask_question(self, query: str):
+        if not self.settings.get("voice_guided", True):
+            self._set_status("Voice-guided read is disabled", WARN)
+            return
+        self._set_status(f'Thinking about "{query}"…', ACCENT)
+        threading.Thread(target=self._do_ask_question, args=(query,), daemon=True).start()
+
+    def _do_ask_question(self, query: str):
+        try:
+            key = os.getenv("GROQ_API_KEY")
+            if not key:
+                self._set_status("GROQ_API_KEY required to answer questions", WARN)
+                return
+            img = screen_ocr.capture_chrome_screenshot()
+            client = self._groq_client()
+            answer = groq_vision.answer_page_question(client, img, query)
+            if not answer:
+                self._set_status("No answer found", WARN)
+                return
+            self._set_status("Answering…", ACCENT)
+            self._speaker.speak_lines([answer])
+            self._set_status("Done", OK)
+        except Exception as e:
+            log(f"ask_question failed: {e}")
             self._set_status(f"Error: {e}", REC)
 
     def _ask_groq_section(self, query: str, elements: list[dict]) -> list[int]:

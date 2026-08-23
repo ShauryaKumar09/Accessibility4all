@@ -21,6 +21,7 @@ DEFAULT_PAGE_READER_SETTINGS = {
     "hotkeys": {"read_screen": "F9", "stop": "F10"},
     "tts_rate": 145,
     "tts_volume": 1.0,
+    "tts_voice": "en-US-AvaMultilingualNeural",
     "hover_delay_ms": 200,
 }
 

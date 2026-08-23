@@ -277,13 +277,24 @@ def elements_in_region(elements: list[dict],
     return out
 
 
+_BOILERPLATE_SKIP = re.compile(
+    r"^(home|shorts|subscriptions|explore|library|history|sign in|sign up|log in|menu|search|"
+    r"images?|videos?|news|shopping|maps|more|tools|all|about|ai overview|"
+    r"accept(\s+all)?|reject(\s+all)?|cookies?|privacy policy|terms of service|"
+    r"sponsored|advertisement|ad|skip ad|share|save|subscribe|follow|notifications)$",
+    re.I,
+)
+
+
 def all_reading_order(elements: list[dict]) -> list[str]:
-    """Paragraph texts in reading order — one entry per merged block."""
+    """Paragraph texts in reading order — one entry per merged block, nav/boilerplate skipped."""
     ordered = sorted(elements, key=lambda e: (e["y0"], e["x0"]))
     lines = []
     for e in ordered:
         text = (e.get("text") or "").strip()
         if len(text) < 2:
+            continue
+        if _BOILERPLATE_SKIP.match(text.strip()):
             continue
         if lines and text == lines[-1]:
             continue

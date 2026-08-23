@@ -1,0 +1,7 @@
+{
+  "name": "Focus Mode",
+  "description": "Blocks configured distracting sites system-wide for a timed session by editing the hosts file. Requires running as Administrator.",
+  "entry": "main.py",
+  "version": "0.2.0",
+  "author": "Accessibility4all"
+}

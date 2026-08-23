@@ -43,12 +43,16 @@ def image_to_data_url(img: Image.Image, max_size: int = 1280) -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
-def summarize_page_image(client: Groq, img: Image.Image, context: str = "") -> str:
+def summarize_page_image(
+    client: Groq, img: Image.Image, context: str = "", level_instruction: str = "",
+) -> str:
     """Return a spoken script of important on-page content from a screenshot."""
     data_url = image_to_data_url(img)
     user_text = PAGE_SUMMARY_PROMPT
     if context.strip():
         user_text += f"\n\nFocus only on text related to: {context.strip()}"
+    if level_instruction.strip():
+        user_text += f"\n\n{level_instruction.strip()}"
 
     response = client.chat.completions.create(
         model=VISION_MODEL,
@@ -66,6 +70,38 @@ def summarize_page_image(client: Groq, img: Image.Image, context: str = "") -> s
     text = (response.choices[0].message.content or "").strip()
     text = re.sub(r"\s+", " ", text)
     return text
+
+
+ANSWER_QUESTION_PROMPT = """You help a blind user understand a Chrome web page by answering their question.
+
+Look at the screenshot and answer the user's question in 1-3 short spoken sentences.
+
+Rules:
+- Answer directly and specifically using only what's visible in the screenshot.
+- If the answer isn't visible on screen, say so plainly instead of guessing.
+- Plain spoken sentences only. No markdown, bullets, or labels like "Answer:"."""
+
+
+def answer_page_question(client: Groq, img: Image.Image, question: str) -> str:
+    """Return a short spoken answer to a free-form question about the page."""
+    data_url = image_to_data_url(img)
+    user_text = f"{ANSWER_QUESTION_PROMPT}\n\nQuestion: {question.strip()}"
+
+    response = client.chat.completions.create(
+        model=VISION_MODEL,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_text},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+        temperature=0.2,
+        max_tokens=256,
+        timeout=GROQ_TIMEOUT,
+    )
+    text = (response.choices[0].message.content or "").strip()
+    return re.sub(r"\s+", " ", text)
 
 
 def script_to_lines(script: str) -> list[str]:

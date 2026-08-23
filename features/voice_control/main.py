@@ -636,6 +636,8 @@ _STOP_READING_RE = re.compile(r"^stop\s+reading\s*$", re.I)
 _READ_LAST_RE = re.compile(
     r"^read\s+(?:that\s+(?:again|section)|it\s+again)\s*$", re.I)
 _READ_SECTION_RE = re.compile(r"^read(?:\s+out)?(?:\s+the)?\s+(.+)$", re.I)
+_ASK_MEANING_RE = re.compile(r"^(?:what\s+(?:is|does|are)|explain)\s+(.+)$", re.I)
+_SUMMARIZE_RE = re.compile(r"^(?:summarize|sum\s+up)(?:\s+this)?(?:\s+page)?\s*$", re.I)
 
 
 def match_read_command(command: str) -> dict | None:
@@ -653,9 +655,19 @@ def match_read_command(command: str) -> dict | None:
     return None
 
 
+def match_ask_command(command: str) -> dict | None:
+    """If command is a free-form question about the page, return {cmd, text}."""
+    cmd = command.strip()
+    if _SUMMARIZE_RE.match(cmd):
+        return {"cmd": "ask_question", "text": "What is this page about? Summarize it."}
+    if _ASK_MEANING_RE.match(cmd):
+        return {"cmd": "ask_question", "text": cmd}
+    return None
+
+
 def try_forward_to_page_reader(command: str) -> tuple[bool, str | None]:
-    """Forward read intents to page_reader. Returns (handled, error_message)."""
-    intent = match_read_command(command)
+    """Forward read/ask intents to page_reader. Returns (handled, error_message)."""
+    intent = match_read_command(command) or match_ask_command(command)
     if intent is None:
         return False, None
     if not feature_bus.is_feature_running("page_reader"):
