@@ -66,7 +66,7 @@ FEATURE_COPY = {
     "dyslexia_font": ("Dyslexia Font",
                       "Swaps websites to an easier-to-read font."),
     "colorblind_filter": ("Color Blind Filter",
-                          "Adjusts colors on your whole screen to be easier to tell apart."),
+                          "Makes colors on your screen easier to tell apart."),
     "focus_mode": ("Focus Mode",
                   "Blocks distracting sites for a set amount of time."),
 }
@@ -117,26 +117,25 @@ WALKTHROUGHS = {
          "Windows you can also swap the fonts apps use."),
     ],
     "colorblind_filter": [
-        ("Pick the type that helps you most",
-         "Choose Deuteranopia, Protanopia, or Tritanopia in this settings sheet. "
-         "It changes your whole screen, not just one app."),
-        ("Turn it on or off any time",
-         "The switch at the top applies right away. If your screen doesn't change "
-         "instantly, try locking and unlocking (Win+L)."),
-        ("It's a Windows feature under the hood",
-         "This uses Windows' own built-in color filter, so it works the same way "
+        ("Pick the type that helps most",
+         "Choose Deuteranopia, Protanopia, or Tritanopia. It changes your whole "
+         "screen, not just one app."),
+        ("Flip the switch any time",
+         "It applies right away. If the screen doesn't change, try locking and "
+         "unlocking (Win+L)."),
+        ("It's a built-in Windows feature",
+         "This uses Windows' own color filter, so it works the same way your "
          "system settings do."),
     ],
     "focus_mode": [
         ("Add the sites that distract you",
-         "List them one per line in this settings sheet — just the domain, like "
-         "youtube.com."),
-        ("Set how long, then start",
-         "Pick a length with the −/+ buttons and press Start. Those sites are "
-         "blocked everywhere, not just in one browser tab."),
+         "List them one per line, just the domain — like youtube.com."),
+        ("Set how long, then flip the switch",
+         "Pick a length with the −/+ buttons. Those sites are blocked "
+         "everywhere, not just one browser tab."),
         ("It ends on its own",
-         "The block clears automatically when the timer runs out, or right away "
-         "if you press Stop."),
+         "The block clears when the timer runs out, or right away if you turn "
+         "the switch off."),
     ],
 }
 
@@ -846,7 +845,7 @@ class SettingsSheet(tk.Toplevel):
             cf.set_filter(bool(self.settings.get("enabled", False)),
                           cf.FILTER_TYPES[self.settings.get("filter_name", "Deuteranopia")])
             self._status_var.set(
-                "Applied. If the screen doesn't change instantly, lock and unlock (Win+L)."
+                "Applied. If nothing changes, lock and unlock (Win+L)."
                 if self.settings.get("enabled") else "Filter off.")
         except Exception as e:
             self._status_var.set(str(e))
@@ -863,12 +862,22 @@ class SettingsSheet(tk.Toplevel):
                  font=self.fonts["body_sm"], fg=C["FG_SECOND"], bg=C["BG"],
                  anchor="w").pack(fill="x", padx=pad_x,
                                   pady=(ui.s(18, self.scale), ui.s(8, self.scale)))
+        # A rounded card (matching every other row's radius-14 card) with the
+        # Text widget embedded inside, rather than a bare square box.
+        text_h = ui.s(110, self.scale)
+        inset = ui.s(14, self.scale)
+        card_h = text_h + inset * 2
+        card = tk.Canvas(self.body, width=width, height=card_h, bg=C["BG"],
+                         highlightthickness=0, bd=0)
+        card.pack(fill="x", padx=pad_x)
+        ui.rounded_rect(card, 1, 1, width - 1, card_h - 1, 14,
+                        fill=C["CARD"], outline=C["BORDER"], width=1)
         self._blocklist_text = tk.Text(
-            self.body, height=5, width=1, bg=C["CARD"], fg=C["FG"],
-            insertbackground=C["FG"], relief="flat",
-            highlightthickness=1, highlightbackground=C["BORDER"],
+            card, bg=C["CARD"], fg=C["FG"], insertbackground=C["FG"],
+            relief="flat", bd=0, highlightthickness=0, wrap="word",
             font=self.fonts["body_sm"])
-        self._blocklist_text.pack(fill="x", padx=pad_x)
+        card.create_window(inset, inset, anchor="nw", window=self._blocklist_text,
+                           width=width - inset * 2, height=text_h)
         self._blocklist_text.insert("1.0", "\n".join(self.settings.get("blocklist", [])))
         self._blocklist_text.bind("<FocusOut>", lambda e: self._save_blocklist())
 
@@ -884,8 +893,7 @@ class SettingsSheet(tk.Toplevel):
             fm = _load_feature_module("focus_mode")
             if not fm.is_admin():
                 self._focus_status_var.set(
-                    "Not running as Administrator — blocking will fail. "
-                    "Restart the hub as Administrator.")
+                    "Run the hub as Administrator, or blocking will fail.")
         except Exception as e:
             self._focus_status_var.set(str(e))
 
@@ -942,6 +950,8 @@ class SettingsSheet(tk.Toplevel):
         store.save(self.feat.id, self.settings)
         if key == "font_family":
             self._refresh_font_status()
+        if self.feat.id == "colorblind_filter" and key == "enabled":
+            self._apply_colorblind_filter()
 
     def refresh_font_cards(self):
         for card in self._font_cards:
@@ -1030,10 +1040,8 @@ import random as _random   # noqa: E402
 import time as _time       # noqa: E402
 
 SCREENING_DISCLAIMER = (
-    "This is NOT a diagnostic tool and cannot identify dyslexia. It only notices "
-    "a few patterns that are sometimes associated with reading differences. If "
-    "you have concerns about reading difficulty, please consult a qualified "
-    "specialist such as an educational psychologist or learning-disabilities specialist."
+    "Not a diagnosis — it can't identify dyslexia, only a few related patterns. "
+    "If reading is a concern, talk to a specialist such as an educational psychologist."
 )
 
 SCREENING_QUESTIONS = [
@@ -1114,8 +1122,7 @@ class ScreeningDialog(tk.Toplevel):
         self._title("Dyslexia Screening")
         self._disclaimer_label()
         tk.Label(self.body,
-                 text=f"{len(self._questions)} quick questions, then one short "
-                      "timed reading task. Answer as best you can.",
+                 text=f"{len(self._questions)} quick questions, then a short timed reading task.",
                  font=self.fonts["body_sm"], fg=C["FG_SECOND"], bg=C["BG"],
                  wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
             anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(20, self.scale)))
@@ -1157,16 +1164,24 @@ class ScreeningDialog(tk.Toplevel):
     def _show_reading_task(self):
         self._clear()
         self._title("Reading speed")
-        tk.Label(self.body, text="Read the passage below, then press Done as soon "
-                                  "as you finish.",
+        tk.Label(self.body, text="Read the passage, then press Done.",
                  font=self.fonts["ui_sm"], fg=C["FG_MUTED"], bg=C["BG"],
                  wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
             anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(10, self.scale)))
-        card = tk.Frame(self.body, bg=C["CARD"])
-        card.pack(fill="x", padx=ui.s(20, self.scale))
-        tk.Label(card, text=SCREENING_PASSAGE, font=self.fonts["body"], fg=C["FG"],
-                 bg=C["CARD"], wraplength=self._width - ui.s(70, self.scale), justify="left",
-                 padx=ui.s(14, self.scale), pady=ui.s(14, self.scale)).pack(fill="x")
+        # A rounded card (matching every other card's radius-14 look) with the
+        # passage text embedded inside, rather than a bare square box.
+        card_w = self._width - ui.s(40, self.scale)
+        pad = ui.s(14, self.scale)
+        label = tk.Label(self.body, text=SCREENING_PASSAGE, font=self.fonts["body"],
+                         fg=C["FG"], bg=C["CARD"], wraplength=card_w - pad * 2, justify="left")
+        label.update_idletasks()
+        card_h = label.winfo_reqheight() + pad * 2
+        card = tk.Canvas(self.body, width=card_w, height=card_h, bg=C["BG"],
+                         highlightthickness=0, bd=0)
+        card.pack(padx=ui.s(20, self.scale))
+        ui.rounded_rect(card, 1, 1, card_w - 1, card_h - 1, 14,
+                        fill=C["CARD"], outline=C["BORDER"], width=1)
+        card.create_window(pad, pad, anchor="nw", window=label)
         self._reading_start = _time.perf_counter()
         ui.TextButton(self.body, self.fonts, "Done reading", self._finish_reading,
                       role="ui", primary=True, height=ui.s(60, self.scale)).pack(
