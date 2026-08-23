@@ -22,6 +22,7 @@ DEFAULT_PAGE_READER_SETTINGS = {
     "tts_rate": 145,
     "tts_volume": 1.0,
     "tts_voice": "en-US-AvaMultilingualNeural",
+    "reading_level": "Normal",
     "hover_delay_ms": 200,
 }
 

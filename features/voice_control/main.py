@@ -1360,6 +1360,7 @@ class App(tk.Tk):
         self._recorder = PushToTalkRecorder()
         self._always_listener: AlwaysOnListener | None = None
         self._always_on = bool(self.settings.get("always_on", False))
+        self._dictation_mode = bool(self.settings.get("dictation_mode", False))
         self._recording = False
         self._busy = False        # True while transcribing / acting on a command
         self._reset_after = None  # pending "reset to idle" timer id
@@ -1468,6 +1469,15 @@ class App(tk.Tk):
             activeforeground=TEXT,
         ).pack(anchor="w")
 
+        self._dictation_var = tk.BooleanVar(value=self._dictation_mode)
+        tk.Checkbutton(
+            toggles, text="Dictation mode (type what you say, don't run commands)",
+            variable=self._dictation_var, command=self._on_dictation_toggle,
+            font=tkfont.Font(family="Helvetica", size=9),
+            fg=TEXT, bg=BG, selectcolor=CARD, activebackground=BG,
+            activeforeground=TEXT,
+        ).pack(anchor="w")
+
         self._hint_var = tk.StringVar(value="hold   `   to talk")
         tk.Label(self, textvariable=self._hint_var,
                  font=tkfont.Font(family="Helvetica", size=9),
@@ -1498,6 +1508,11 @@ class App(tk.Tk):
             self._hint_var.set("hold   `   to talk")
             if not self._busy and not self._recording:
                 self._reset_idle()
+
+    def _on_dictation_toggle(self):
+        self._dictation_mode = self._dictation_var.get()
+        self.settings["dictation_mode"] = self._dictation_mode
+        save_settings(self.settings)
 
     def _start_always_on(self):
         if self._always_listener is None:
@@ -1852,6 +1867,17 @@ class App(tk.Tk):
             trial["command"] = command
             self._set_status("Heard you", MUTED)
             self._chat_say("you", command)
+
+            if self._dictation_mode:
+                plat.paste_text(command)
+                preview = command if len(command) <= 60 else command[:57] + "…"
+                self._set_status(f"Typed: {preview}", OK)
+                self._chat_say("ok", f"Typed: {command}")
+                trial["dictated"] = True
+                trial["success"] = True
+                _log_trial(trial)
+                self._schedule_reset()
+                return
 
             if not _should_process_command(command):
                 log("PIPELINE", f"ignored non-command speech: {command!r}", "WARN")

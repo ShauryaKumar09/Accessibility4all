@@ -24,7 +24,7 @@ import tkinter as tk
 from dotenv import load_dotenv
 from groq import Groq
 from pynput import keyboard, mouse
-from tkinter import font as tkfont
+from tkinter import font as tkfont, ttk
 
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
@@ -41,6 +41,17 @@ SETTINGS_FILE = FEATURE_DIR / "settings.json"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT = 30
 MAX_ELEMENTS = 120
+
+READING_LEVELS = {
+    "Normal": "",
+    "5th grade": ("Explain it the way you would to a 10-year-old: "
+                  "short sentences, common words, no jargon."),
+    "Middle school": ("Use clear, plain language a middle-schooler would understand; "
+                       "define any unavoidable technical terms."),
+    "Plain adult": ("Rewrite in plain, jargon-free adult language "
+                     "— clear and concise, no unnecessary complexity."),
+}
+READING_LEVEL_ORDER = ["Normal", "5th grade", "Middle school", "Plain adult"]
 READ_SECTION_PROMPT = """You pick which OCR lines to read aloud for a blind user.
 
 You get a numbered list of EXACT text lines from the screen and what the user asked to hear.
@@ -359,6 +370,16 @@ class PageReaderApp(tk.Tk):
                        fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
                        activeforeground=FG).pack(anchor="w")
 
+        level_row = tk.Frame(self, bg=BG)
+        level_row.pack(fill="x", padx=14, pady=(4, 0))
+        tk.Label(level_row, text="Reading level:", font=tkfont.Font(family="Helvetica", size=9),
+                 fg=MUTED, bg=BG).pack(side="left")
+        self._level_var = tk.StringVar(value=self.settings.get("reading_level", "Normal"))
+        level_combo = ttk.Combobox(level_row, textvariable=self._level_var,
+                                    values=READING_LEVEL_ORDER, state="readonly", width=13)
+        level_combo.pack(side="left", padx=(6, 0))
+        level_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_toggle_change())
+
         hk_frame = tk.Frame(self, bg=BG)
         hk_frame.pack(fill="x", padx=14, pady=(8, 0))
 
@@ -429,6 +450,7 @@ class PageReaderApp(tk.Tk):
         self.settings["voice_guided"] = self._voice_var.get()
         self.settings["hover_to_read"] = self._hover_var.get()
         self.settings["use_groq_summary"] = self._groq_var.get()
+        self.settings["reading_level"] = self._level_var.get()
         save_settings(self.settings)
         self._update_hover_listener()
 
@@ -610,7 +632,8 @@ class PageReaderApp(tk.Tk):
         self._set_status("Analyzing Chrome with AI…", ACCENT)
         img = screen_ocr.capture_chrome_screenshot()
         client = self._groq_client()
-        script = groq_vision.summarize_page_image(client, img)
+        level_instruction = READING_LEVELS.get(self.settings.get("reading_level", "Normal"), "")
+        script = groq_vision.summarize_page_image(client, img, level_instruction=level_instruction)
         lines = groq_vision.script_to_lines(script)
         if not lines:
             self._set_status("Nothing important found in Chrome", WARN)

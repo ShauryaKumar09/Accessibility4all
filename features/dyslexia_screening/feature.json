@@ -1,7 +1,0 @@
-{
-  "name": "Dyslexia Screening",
-  "description": "A short, non-diagnostic self-check for common reading-difficulty patterns (letter reversal, rhyme, reading speed).",
-  "entry": "main.py",
-  "version": "0.1.0",
-  "author": "Accessibility4all"
-}

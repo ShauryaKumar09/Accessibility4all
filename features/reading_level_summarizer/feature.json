@@ -1,7 +1,0 @@
-{
-  "name": "Reading Level Summarizer",
-  "description": "Summarizes the current Chrome page at a chosen reading level and reads it aloud.",
-  "entry": "main.py",
-  "version": "0.1.0",
-  "author": "Accessibility4all"
-}

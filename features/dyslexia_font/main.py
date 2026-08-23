@@ -10,13 +10,15 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
@@ -266,6 +268,174 @@ def open_chrome_extensions():
         messagebox.showerror("Dyslexia Font", f"Could not open Chrome extensions:\n{e}")
 
 
+# ── Screening test (short, non-diagnostic self-check) ──────────────────────────
+# NOT a diagnostic tool. It cannot identify dyslexia. It only notices a few
+# patterns sometimes associated with reading differences, so the disclaimer is
+# shown before the quiz starts and again with the result.
+SCREENING_DISCLAIMER = (
+    "This is NOT a diagnostic tool and cannot identify dyslexia. It only notices "
+    "a few patterns that are sometimes associated with reading differences. If "
+    "you have concerns about reading difficulty, please consult a qualified "
+    "specialist such as an educational psychologist or learning-disabilities specialist."
+)
+
+SCREENING_QUESTIONS = [
+    {"prompt": "Which one matches the target letter?\n\nTarget: b",
+     "options": ["d", "b", "p", "q"], "correct": 1},
+    {"prompt": "Which one matches the target letter?\n\nTarget: p",
+     "options": ["q", "d", "p", "b"], "correct": 2},
+    {"prompt": "Which word is spelled the same forwards and as shown?\n\nTarget: was",
+     "options": ["saw", "was", "sae", "aws"], "correct": 1},
+    {"prompt": "Which word does NOT rhyme with the others?",
+     "options": ["cat", "hat", "dog", "bat"], "correct": 2},
+    {"prompt": "Which word does NOT rhyme with the others?",
+     "options": ["light", "night", "sight", "bench"], "correct": 3},
+    {"prompt": "Put in order: which comes first alphabetically?",
+     "options": ["dog", "cat", "ant", "elk"], "correct": 2},
+]
+
+SCREENING_PASSAGE = (
+    "The quick brown fox jumps over the lazy dog. Reading every day helps build "
+    "stronger word recognition and comprehension over time."
+)
+SCREENING_TYPICAL_WPM = 200  # rough, non-clinical adult reference
+
+
+class ScreeningDialog(tk.Toplevel):
+    """Short non-diagnostic quiz (letter reversal, rhyme, reading speed)."""
+
+    WIN_W, WIN_H = 440, 380
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Dyslexia Screening")
+        self.resizable(False, False)
+        self.geometry(f"{self.WIN_W}x{self.WIN_H}")
+        self.configure(bg="#1a1a2e")
+        self.attributes("-topmost", True)
+
+        self._questions = random.sample(SCREENING_QUESTIONS, len(SCREENING_QUESTIONS))
+        self._idx = 0
+        self._flags = 0
+        self._reading_start = 0.0
+
+        self._frame = tk.Frame(self, bg="#1a1a2e")
+        self._frame.pack(fill="both", expand=True)
+        self._show_intro()
+
+    def _clear(self):
+        for child in self._frame.winfo_children():
+            child.destroy()
+
+    def _title(self, text: str):
+        tk.Label(self._frame, text=text,
+                 font=tkfont.Font(family="Helvetica", size=15, weight="bold"),
+                 fg="#e0e0ff", bg="#1a1a2e", wraplength=self.WIN_W - 40, justify="left").pack(
+            anchor="w", padx=20, pady=(20, 8))
+
+    def _disclaimer_label(self, parent):
+        tk.Label(parent, text=SCREENING_DISCLAIMER, font=tkfont.Font(family="Helvetica", size=9),
+                 fg="#ffd166", bg="#1a1a2e", wraplength=self.WIN_W - 40, justify="left").pack(
+            anchor="w", padx=20, pady=(0, 12))
+
+    def _show_intro(self):
+        self._clear()
+        self._title("Dyslexia Screening")
+        self._disclaimer_label(self._frame)
+        tk.Label(self._frame,
+                 text=f"{len(self._questions)} quick questions, then one short "
+                      "timed reading task. Answer as best you can.",
+                 font=tkfont.Font(family="Helvetica", size=10),
+                 fg="#8a8ab0", bg="#1a1a2e", wraplength=self.WIN_W - 40, justify="left").pack(
+            anchor="w", padx=20, pady=(0, 20))
+        tk.Button(self._frame, text="Start", command=self._show_question,
+                  font=tkfont.Font(family="Helvetica", size=10, weight="bold"),
+                  bg="#23233f", fg="#e0e0ff", relief="flat", padx=16, pady=8,
+                  cursor="hand2").pack(anchor="w", padx=20)
+
+    def _show_question(self):
+        if self._idx >= len(self._questions):
+            self._show_reading_task()
+            return
+        self._clear()
+        q = self._questions[self._idx]
+        tk.Label(self._frame, text=f"Question {self._idx + 1} of {len(self._questions)}",
+                 font=tkfont.Font(family="Helvetica", size=9),
+                 fg="#8a8ab0", bg="#1a1a2e").pack(anchor="w", padx=20, pady=(16, 4))
+        tk.Label(self._frame, text=q["prompt"],
+                 font=tkfont.Font(family="Helvetica", size=13, weight="bold"),
+                 fg="#e0e0ff", bg="#1a1a2e", wraplength=self.WIN_W - 40, justify="left").pack(
+            anchor="w", padx=20, pady=(4, 16))
+
+        options = list(enumerate(q["options"]))
+        random.shuffle(options)
+        for orig_idx, text in options:
+            tk.Button(self._frame, text=text, anchor="w",
+                      command=lambda oi=orig_idx: self._answer(q, oi),
+                      font=tkfont.Font(family="Helvetica", size=11),
+                      bg="#23233f", fg="#e0e0ff", relief="flat", padx=14, pady=8,
+                      cursor="hand2").pack(fill="x", padx=20, pady=4)
+
+    def _answer(self, q: dict, chosen_idx: int):
+        if chosen_idx != q["correct"]:
+            self._flags += 1
+        self._idx += 1
+        self._show_question()
+
+    def _show_reading_task(self):
+        self._clear()
+        self._title("Reading speed")
+        tk.Label(self._frame, text="Read the passage below aloud or silently, "
+                                    "then click Done as soon as you finish.",
+                 font=tkfont.Font(family="Helvetica", size=9),
+                 fg="#8a8ab0", bg="#1a1a2e", wraplength=self.WIN_W - 40, justify="left").pack(
+            anchor="w", padx=20, pady=(0, 10))
+        tk.Label(self._frame, text=SCREENING_PASSAGE,
+                 font=tkfont.Font(family="Helvetica", size=12),
+                 fg="#e0e0ff", bg="#23233f", wraplength=self.WIN_W - 60, justify="left",
+                 padx=14, pady=14).pack(fill="x", padx=20)
+        self._reading_start = time.perf_counter()
+        tk.Button(self._frame, text="Done reading", command=self._finish_reading,
+                  font=tkfont.Font(family="Helvetica", size=10, weight="bold"),
+                  bg="#23233f", fg="#e0e0ff", relief="flat", padx=16, pady=8,
+                  cursor="hand2").pack(anchor="w", padx=20, pady=16)
+
+    def _finish_reading(self):
+        elapsed = max(0.5, time.perf_counter() - self._reading_start)
+        word_count = len(SCREENING_PASSAGE.split())
+        wpm = word_count / (elapsed / 60)
+        if wpm < SCREENING_TYPICAL_WPM * 0.5:
+            self._flags += 1
+        self._show_result(wpm)
+
+    def _show_result(self, wpm: float):
+        self._clear()
+        if self._flags <= 1:
+            bucket, color, msg = "low", "#69db7c", "Few patterns showed up in your answers."
+        elif self._flags <= 3:
+            bucket, color, msg = "medium", "#ffd166", "Some patterns showed up in your answers."
+        else:
+            bucket, color, msg = "high", "#ff6b6b", "Several patterns showed up in your answers."
+
+        self._title("Result")
+        tk.Label(self._frame, text=f"{msg} (reading speed: {wpm:.0f} words/min)",
+                 font=tkfont.Font(family="Helvetica", size=12, weight="bold"),
+                 fg=color, bg="#1a1a2e", wraplength=self.WIN_W - 40, justify="left").pack(
+            anchor="w", padx=20, pady=(4, 12))
+        self._disclaimer_label(self._frame)
+        tk.Button(self._frame, text="Try again", command=self._restart,
+                  font=tkfont.Font(family="Helvetica", size=10),
+                  bg="#23233f", fg="#e0e0ff", relief="flat", padx=14, pady=6,
+                  cursor="hand2").pack(anchor="w", padx=20)
+        log(f"screening result: bucket={bucket} flags={self._flags} wpm={wpm:.0f}")
+
+    def _restart(self):
+        self._questions = random.sample(SCREENING_QUESTIONS, len(SCREENING_QUESTIONS))
+        self._idx = 0
+        self._flags = 0
+        self._show_intro()
+
+
 class DyslexiaFontApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -273,7 +443,7 @@ class DyslexiaFontApp(tk.Tk):
 
         self.title("Dyslexia Font")
         self.resizable(False, False)
-        self.geometry("430x430")
+        self.geometry("430x470")
         self.configure(bg="#1a1a2e")
         self.attributes("-topmost", True)
         self.protocol("WM_DELETE_WINDOW", self._shutdown)
@@ -378,9 +548,14 @@ class DyslexiaFontApp(tk.Tk):
         ).pack(anchor="w", pady=(4, 10))
 
         buttons = tk.Frame(frame, bg="#1a1a2e")
-        buttons.pack(fill="x", pady=(4, 12))
+        buttons.pack(fill="x", pady=(4, 4))
         tk.Button(buttons, text="Open extension folder", command=open_extension_folder).pack(side="left")
         tk.Button(buttons, text="Open Chrome extensions", command=open_chrome_extensions).pack(side="left", padx=8)
+
+        screening_row = tk.Frame(frame, bg="#1a1a2e")
+        screening_row.pack(fill="x", pady=(0, 12))
+        tk.Button(screening_row, text="Take screening test",
+                  command=lambda: ScreeningDialog(self)).pack(side="left")
 
         tk.Frame(frame, height=1, bg="#33335a").pack(fill="x", pady=10)
 
