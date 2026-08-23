@@ -18,6 +18,7 @@ FEATURES_DIR = ROOT / "features"
 DEFAULTS: dict[str, dict] = {
     "voice_control": {
         "always_on": False,
+        "dictation_mode": False,
     },
     "page_reader": {
         "voice_guided": True,
@@ -26,6 +27,8 @@ DEFAULTS: dict[str, dict] = {
         "hotkeys": {"read_screen": "F9", "stop": "F10"},
         "tts_rate": 145,
         "tts_volume": 1.0,
+        "tts_voice": "en-US-AvaMultilingualNeural",
+        "reading_level": "Normal",
         "hover_delay_ms": 200,
     },
     "tone_reader": {
@@ -43,6 +46,16 @@ DEFAULTS: dict[str, dict] = {
         "font_weight": "inherit",
         "windows_targets": ["Arial", "Calibri", "Segoe UI", "Tahoma",
                             "Times New Roman", "Verdana"],
+    },
+    "colorblind_filter": {
+        "enabled": False,
+        "filter_name": "Deuteranopia",
+    },
+    "focus_mode": {
+        "active": False,
+        "blocklist": ["youtube.com", "twitter.com", "reddit.com"],
+        "duration_minutes": 25,
+        "end_time": 0.0,        # internal bookkeeping, not a settings-sheet control
     },
 }
 

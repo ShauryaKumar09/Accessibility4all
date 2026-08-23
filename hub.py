@@ -17,6 +17,7 @@ The feature processes themselves only draw a small desktop bubble.
 
 import sys
 import json
+import importlib.util
 import subprocess
 from pathlib import Path
 
@@ -37,8 +38,23 @@ FEATURES_DIR = ROOT / "features"
 STATE_FILE = ROOT / "hub_state.json"     # toggles, text size, walkthroughs seen
 
 
+def _load_feature_module(feature_id: str):
+    """Import a feature's main.py for its pure logic functions (no Tk app built).
+
+    Both colorblind_filter and focus_mode are single-shot actions the hub can
+    just call directly rather than round-tripping through settings.json polling.
+    Loaded under a unique name (not "main") so the two don't collide in sys.modules.
+    """
+    path = FEATURES_DIR / feature_id / "main.py"
+    spec = importlib.util.spec_from_file_location(f"a4a_feature_{feature_id}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 # ── Plain-language copy (rewritten from the feature.json descriptions) ────────
-FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader", "dyslexia_font"]
+FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader", "dyslexia_font",
+                 "colorblind_filter", "focus_mode"]
 
 FEATURE_COPY = {
     "voice_control": ("Voice Control",
@@ -49,6 +65,10 @@ FEATURE_COPY = {
                     "Explains the tone behind a message you highlight."),
     "dyslexia_font": ("Dyslexia Font",
                       "Swaps websites to an easier-to-read font."),
+    "colorblind_filter": ("Color Blind Filter",
+                          "Adjusts colors on your whole screen to be easier to tell apart."),
+    "focus_mode": ("Focus Mode",
+                  "Blocks distracting sites for a set amount of time."),
 }
 
 WALKTHROUGHS = {
@@ -96,11 +116,36 @@ WALKTHROUGHS = {
          "With the Chrome extension installed, pages you open use your font. On "
          "Windows you can also swap the fonts apps use."),
     ],
+    "colorblind_filter": [
+        ("Pick the type that helps you most",
+         "Choose Deuteranopia, Protanopia, or Tritanopia in this settings sheet. "
+         "It changes your whole screen, not just one app."),
+        ("Turn it on or off any time",
+         "The switch at the top applies right away. If your screen doesn't change "
+         "instantly, try locking and unlocking (Win+L)."),
+        ("It's a Windows feature under the hood",
+         "This uses Windows' own built-in color filter, so it works the same way "
+         "system settings do."),
+    ],
+    "focus_mode": [
+        ("Add the sites that distract you",
+         "List them one per line in this settings sheet — just the domain, like "
+         "youtube.com."),
+        ("Set how long, then start",
+         "Pick a length with the −/+ buttons and press Start. Those sites are "
+         "blocked everywhere, not just in one browser tab."),
+        ("It ends on its own",
+         "The block clears automatically when the timer runs out, or right away "
+         "if you press Stop."),
+    ],
 }
 
 # Copy for the option switches in each settings sheet: (settings key, label).
 SHEET_OPTIONS = {
-    "voice_control": [("always_on", "Listen without holding the key")],
+    "voice_control": [
+        ("always_on", "Listen without holding the key"),
+        ("dictation_mode", "Type what I say instead of running it"),
+    ],
     "page_reader": [
         ("voice_guided", "Let me pick sections by voice"),
         ("hover_to_read", "Read when I rest the pointer"),
@@ -108,6 +153,8 @@ SHEET_OPTIONS = {
     ],
     "tone_reader": [("click_to_analyze", "Shift+Click a paragraph in Chrome")],
     "dyslexia_font": [("website_enabled", "Use this font on websites")],
+    "colorblind_filter": [("enabled", "Turn the filter on")],
+    "focus_mode": [("active", "Blocking now")],
 }
 
 # Shortcut rows per sheet: (hotkey key, label, editable).
@@ -117,9 +164,16 @@ SHEET_SHORTCUTS = {
                     ("stop", "Stop reading", True)],
     "tone_reader": [("analyze_selection", "Explain the tone", True)],
     "dyslexia_font": [],
+    "colorblind_filter": [],
+    "focus_mode": [],
 }
 
 TONE_SIZE_LABELS = [("small", "Small"), ("medium", "Medium"), ("large", "Large")]
+FILTER_TYPE_LABELS = [
+    ("Deuteranopia", "Deuteranopia"), ("Protanopia", "Protanopia"),
+    ("Tritanopia", "Tritanopia"), ("Grayscale", "Grayscale"),
+    ("Invert", "Invert"), ("Grayscale Inverted", "Gray + Invert"),
+]
 
 WINDOW_W = 800
 WINDOW_MIN_H = 640
@@ -591,6 +645,10 @@ class SettingsSheet(tk.Toplevel):
             self._text_size_row(inner_w, pad_x, gap)
         if self.feat.id == "dyslexia_font":
             self._dyslexia_controls(inner_w, pad_x, gap)
+        if self.feat.id == "colorblind_filter":
+            self._colorblind_controls(inner_w, pad_x, gap)
+        if self.feat.id == "focus_mode":
+            self._focus_controls(inner_w, pad_x, gap)
 
         ui.TextButton(self.body, self.fonts, "Show me how to use it",
                       lambda: self.hub.open_walkthrough(self.feat.id),
@@ -747,6 +805,95 @@ class SettingsSheet(tk.Toplevel):
                       height=ui.s(60, self.scale), width=width).pack(
             fill="x", pady=(ui.s(12, self.scale), 0))
 
+        ui.TextButton(self.body, self.fonts, "Take screening test",
+                      lambda: ScreeningDialog(self.hub), role="ui",
+                      height=ui.s(60, self.scale), width=width).pack(
+            padx=pad_x, pady=(ui.s(12, self.scale), 0))
+
+    def _colorblind_controls(self, width: int, pad_x: int, gap: int):
+        tk.Label(self.body, text="Filter type", font=self.fonts["body_sm"],
+                 fg=C["FG_SECOND"], bg=C["BG"], anchor="w").pack(
+            fill="x", padx=pad_x, pady=(ui.s(18, self.scale), ui.s(8, self.scale)))
+        btn_w = (width - ui.s(12, self.scale) * 2) // 3
+        self._filter_buttons: list[tuple[str, ui.TextButton]] = []
+        for row_start in (0, 3):
+            row = tk.Frame(self.body, bg=C["BG"])
+            row.pack(fill="x", padx=pad_x, pady=(0, ui.s(12, self.scale)))
+            for value, label in FILTER_TYPE_LABELS[row_start:row_start + 3]:
+                btn = ui.TextButton(
+                    row, self.fonts, label, lambda v=value: self._set_filter_type(v),
+                    role="ui", height=ui.s(60, self.scale), width=btn_w,
+                    primary=self.settings.get("filter_name") == value)
+                btn.pack(side="left", padx=(0, ui.s(12, self.scale)))
+                self._filter_buttons.append((value, btn))
+        tk.Label(self.body, textvariable=self._status_var,
+                 font=self.fonts["ui_sm"], fg=C["WARM_TEXT"], bg=C["BG"],
+                 anchor="w", justify="left", wraplength=width).pack(
+            fill="x", padx=pad_x, pady=(ui.s(6, self.scale), 0))
+        self._apply_colorblind_filter()
+
+    def _set_filter_type(self, value: str):
+        self.set_value("filter_name", value)
+        for val, btn in self._filter_buttons:
+            btn.primary = (val == value)
+            btn.role = "ui_b" if btn.primary else "ui"
+            btn.redraw()
+        self._apply_colorblind_filter()
+
+    def _apply_colorblind_filter(self):
+        try:
+            cf = _load_feature_module("colorblind_filter")
+            cf.set_filter(bool(self.settings.get("enabled", False)),
+                          cf.FILTER_TYPES[self.settings.get("filter_name", "Deuteranopia")])
+            self._status_var.set(
+                "Applied. If the screen doesn't change instantly, lock and unlock (Win+L)."
+                if self.settings.get("enabled") else "Filter off.")
+        except Exception as e:
+            self._status_var.set(str(e))
+
+    def _focus_controls(self, width: int, pad_x: int, gap: int):
+        # The "Blocking now" switch itself is a plain OptionRow, added via
+        # SHEET_OPTIONS like every other feature's toggles — the running
+        # focus_mode bubble watches settings.json (shared.settings_store.Watcher,
+        # same mechanism voice_control's always_on/dictation_mode use) and owns
+        # the countdown/auto-unblock timer on its own Tk mainloop, since only it
+        # stays alive for the whole session regardless of whether this sheet is
+        # open.
+        tk.Label(self.body, text="Blocked sites (one per line)",
+                 font=self.fonts["body_sm"], fg=C["FG_SECOND"], bg=C["BG"],
+                 anchor="w").pack(fill="x", padx=pad_x,
+                                  pady=(ui.s(18, self.scale), ui.s(8, self.scale)))
+        self._blocklist_text = tk.Text(
+            self.body, height=5, width=1, bg=C["CARD"], fg=C["FG"],
+            insertbackground=C["FG"], relief="flat",
+            highlightthickness=1, highlightbackground=C["BORDER"],
+            font=self.fonts["body_sm"])
+        self._blocklist_text.pack(fill="x", padx=pad_x)
+        self._blocklist_text.insert("1.0", "\n".join(self.settings.get("blocklist", [])))
+        self._blocklist_text.bind("<FocusOut>", lambda e: self._save_blocklist())
+
+        self._stepper_row(width, pad_x, "Session length", "duration_minutes",
+                          5, 5, 480, lambda v: f"{int(v)} min")
+
+        self._focus_status_var = tk.StringVar(value="")
+        tk.Label(self.body, textvariable=self._focus_status_var,
+                 font=self.fonts["ui_sm"], fg=C["WARM_TEXT"], bg=C["BG"],
+                 anchor="w", justify="left", wraplength=width).pack(
+            fill="x", padx=pad_x, pady=(ui.s(6, self.scale), 0))
+        try:
+            fm = _load_feature_module("focus_mode")
+            if not fm.is_admin():
+                self._focus_status_var.set(
+                    "Not running as Administrator — blocking will fail. "
+                    "Restart the hub as Administrator.")
+        except Exception as e:
+            self._focus_status_var.set(str(e))
+
+    def _save_blocklist(self):
+        domains = [d.strip() for d in
+                  self._blocklist_text.get("1.0", "end").splitlines() if d.strip()]
+        self.set_value("blocklist", domains)
+
     def _stepper_row(self, width: int, pad_x: int, label: str, key: str,
                      step: float, low: float, high: float, fmt):
         height = max(ui.s(88, self.scale), ui.s(60, self.scale) + ui.s(28, self.scale))
@@ -872,6 +1019,193 @@ class SettingsSheet(tk.Toplevel):
             pass
         self.hub.forget_sheet(self.feat.id)
         self.destroy()
+
+
+# ── Dyslexia screening test ─────────────────────────────────────────────────
+# NOT a diagnostic tool. It cannot identify dyslexia. It only notices a few
+# patterns sometimes associated with reading differences, so the disclaimer is
+# shown before the quiz starts and again with the result. Self-contained —
+# no dependency on the dyslexia_font feature process, so it lives here.
+import random as _random   # noqa: E402
+import time as _time       # noqa: E402
+
+SCREENING_DISCLAIMER = (
+    "This is NOT a diagnostic tool and cannot identify dyslexia. It only notices "
+    "a few patterns that are sometimes associated with reading differences. If "
+    "you have concerns about reading difficulty, please consult a qualified "
+    "specialist such as an educational psychologist or learning-disabilities specialist."
+)
+
+SCREENING_QUESTIONS = [
+    {"prompt": "Which one matches the target letter?\n\nTarget: b",
+     "options": ["d", "b", "p", "q"], "correct": 1},
+    {"prompt": "Which one matches the target letter?\n\nTarget: p",
+     "options": ["q", "d", "p", "b"], "correct": 2},
+    {"prompt": "Which word is spelled the same forwards and as shown?\n\nTarget: was",
+     "options": ["saw", "was", "sae", "aws"], "correct": 1},
+    {"prompt": "Which word does NOT rhyme with the others?",
+     "options": ["cat", "hat", "dog", "bat"], "correct": 2},
+    {"prompt": "Which word does NOT rhyme with the others?",
+     "options": ["light", "night", "sight", "bench"], "correct": 3},
+    {"prompt": "Put in order: which comes first alphabetically?",
+     "options": ["dog", "cat", "ant", "elk"], "correct": 2},
+]
+
+SCREENING_PASSAGE = (
+    "The quick brown fox jumps over the lazy dog. Reading every day helps build "
+    "stronger word recognition and comprehension over time."
+)
+SCREENING_TYPICAL_WPM = 200  # rough, non-clinical adult reference
+
+
+class ScreeningDialog(tk.Toplevel):
+    """Short non-diagnostic quiz (letter reversal, rhyme, reading speed)."""
+
+    WIDTH = 480
+
+    def __init__(self, hub: "Hub"):
+        super().__init__(hub)
+        self.hub = hub
+        self.fonts = hub.fonts
+        self.scale = hub.font_scale
+        self.title("Dyslexia Screening")
+        self.configure(bg=C["BG"])
+        self.transient(hub)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self._questions = _random.sample(SCREENING_QUESTIONS, len(SCREENING_QUESTIONS))
+        self._idx = 0
+        self._flags = 0
+        self._reading_start = 0.0
+
+        self._width = round(self.WIDTH * max(1.0, self.scale))
+        self.body = tk.Frame(self, bg=C["BG"])
+        self.body.pack(fill="both", expand=True)
+        self._show_intro()
+        self._place()
+
+    def _place(self):
+        self.update_idletasks()
+        height = self.body.winfo_reqheight() + ui.s(60, self.scale)
+        x = self.hub.winfo_x() + (self.hub.winfo_width() - self._width) // 2
+        y = max(40, self.hub.winfo_y() + 40)
+        self.geometry(f"{self._width}x{int(height)}+{x}+{y}")
+        self.lift()
+        self.focus_force()
+
+    def _clear(self):
+        for child in self.body.winfo_children():
+            child.destroy()
+
+    def _title(self, text: str):
+        tk.Label(self.body, text=text, font=self.fonts["h4_b"], fg=C["FG"], bg=C["BG"],
+                 wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(ui.s(20, self.scale), ui.s(8, self.scale)))
+
+    def _disclaimer_label(self):
+        tk.Label(self.body, text=SCREENING_DISCLAIMER, font=self.fonts["ui_sm"],
+                 fg=C["WARM_TEXT"], bg=C["BG"],
+                 wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(12, self.scale)))
+
+    def _show_intro(self):
+        self._clear()
+        self._title("Dyslexia Screening")
+        self._disclaimer_label()
+        tk.Label(self.body,
+                 text=f"{len(self._questions)} quick questions, then one short "
+                      "timed reading task. Answer as best you can.",
+                 font=self.fonts["body_sm"], fg=C["FG_SECOND"], bg=C["BG"],
+                 wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(20, self.scale)))
+        ui.TextButton(self.body, self.fonts, "Start", self._show_question,
+                      role="ui", primary=True, height=ui.s(60, self.scale)).pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(20, self.scale)))
+        self._place()
+
+    def _show_question(self):
+        if self._idx >= len(self._questions):
+            self._show_reading_task()
+            return
+        self._clear()
+        q = self._questions[self._idx]
+        tk.Label(self.body, text=f"Question {self._idx + 1} of {len(self._questions)}",
+                 font=self.fonts["ui_sm"], fg=C["FG_MUTED"], bg=C["BG"]).pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(ui.s(20, self.scale), ui.s(6, self.scale)))
+        tk.Label(self.body, text=q["prompt"], font=self.fonts["body_b"], fg=C["FG"], bg=C["BG"],
+                 wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(16, self.scale)))
+
+        options = list(enumerate(q["options"]))
+        _random.shuffle(options)
+        btn_w = self._width - ui.s(40, self.scale)
+        for orig_idx, text in options:
+            ui.TextButton(self.body, self.fonts, text,
+                          lambda oi=orig_idx: self._answer(q, oi),
+                          role="ui", width=btn_w, height=ui.s(56, self.scale)).pack(
+                padx=ui.s(20, self.scale), pady=(0, ui.s(8, self.scale)))
+        tk.Frame(self.body, bg=C["BG"], height=ui.s(12, self.scale)).pack()
+        self._place()
+
+    def _answer(self, q: dict, chosen_idx: int):
+        if chosen_idx != q["correct"]:
+            self._flags += 1
+        self._idx += 1
+        self._show_question()
+
+    def _show_reading_task(self):
+        self._clear()
+        self._title("Reading speed")
+        tk.Label(self.body, text="Read the passage below, then press Done as soon "
+                                  "as you finish.",
+                 font=self.fonts["ui_sm"], fg=C["FG_MUTED"], bg=C["BG"],
+                 wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(10, self.scale)))
+        card = tk.Frame(self.body, bg=C["CARD"])
+        card.pack(fill="x", padx=ui.s(20, self.scale))
+        tk.Label(card, text=SCREENING_PASSAGE, font=self.fonts["body"], fg=C["FG"],
+                 bg=C["CARD"], wraplength=self._width - ui.s(70, self.scale), justify="left",
+                 padx=ui.s(14, self.scale), pady=ui.s(14, self.scale)).pack(fill="x")
+        self._reading_start = _time.perf_counter()
+        ui.TextButton(self.body, self.fonts, "Done reading", self._finish_reading,
+                      role="ui", primary=True, height=ui.s(60, self.scale)).pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(ui.s(16, self.scale), ui.s(20, self.scale)))
+        self._place()
+
+    def _finish_reading(self):
+        elapsed = max(0.5, _time.perf_counter() - self._reading_start)
+        word_count = len(SCREENING_PASSAGE.split())
+        wpm = word_count / (elapsed / 60)
+        if wpm < SCREENING_TYPICAL_WPM * 0.5:
+            self._flags += 1
+        self._show_result(wpm)
+
+    def _show_result(self, wpm: float):
+        self._clear()
+        if self._flags <= 1:
+            color, msg = C["ON"], "Few patterns showed up in your answers."
+        elif self._flags <= 3:
+            color, msg = C["WARM_TEXT"], "Some patterns showed up in your answers."
+        else:
+            color, msg = C["STOP_BORDER"], "Several patterns showed up in your answers."
+
+        self._title("Result")
+        tk.Label(self.body, text=f"{msg} (reading speed: {wpm:.0f} words/min)",
+                 font=self.fonts["body_b"], fg=color, bg=C["BG"],
+                 wraplength=self._width - ui.s(40, self.scale), justify="left").pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(12, self.scale)))
+        self._disclaimer_label()
+        ui.TextButton(self.body, self.fonts, "Try again", self._restart,
+                      role="ui", height=ui.s(52, self.scale)).pack(
+            anchor="w", padx=ui.s(20, self.scale), pady=(0, ui.s(20, self.scale)))
+        self._place()
+
+    def _restart(self):
+        self._questions = _random.sample(SCREENING_QUESTIONS, len(SCREENING_QUESTIONS))
+        self._idx = 0
+        self._flags = 0
+        self._show_intro()
 
 
 # ── Walkthrough ───────────────────────────────────────────────────────────────

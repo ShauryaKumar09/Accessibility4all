@@ -1,33 +1,37 @@
 """Color Blind Filter — toggles Windows' built-in system-wide color filter.
 
-Runs as its own process when toggled ON in the hub. Applies system-wide (not
-just Chrome) by driving Windows' own Ease of Access > Color Filters feature:
-set HKCU\\Software\\Microsoft\\ColorFiltering, then nudge atbroker.exe to make
-it take effect immediately (same trick as pressing Win+Ctrl+C). See
-features/README.md.
+Runs as its own process when toggled ON in the hub. Every control (enable
+switch, filter type) now lives in the hub's settings sheet, which calls
+`set_filter()` directly since this is a single registry write, not continuous
+state — see hub.py's `_apply_colorblind_filter`. This process draws one small
+pill confirming the current filter, and re-applies it on startup in case the
+setting changed while it wasn't running.
+
+Applies system-wide (not just Chrome) by driving Windows' own Ease of
+Access > Color Filters feature: set HKCU\\Software\\Microsoft\\ColorFiltering
+directly (see `set_filter()` below for why a live-toggle shortcut isn't used).
+See features/README.md.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import signal
 import sys
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import messagebox, ttk
 
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, feature_bus, platform as plat  # noqa: E402
+from shared import console, platform as plat, settings_store as store, ui_kit as ui  # noqa: E402
+from shared.ui_kit import C                                                          # noqa: E402
 
 console.configure_stdio()
 
-SETTINGS_FILE = FEATURE_DIR / "settings.json"
+FEATURE_ID = "colorblind_filter"
 COLOR_FILTERING_PATH = r"Software\Microsoft\ColorFiltering"
 
 FILTER_TYPES = {
@@ -39,27 +43,26 @@ FILTER_TYPES = {
     "Grayscale Inverted": 2,
 }
 
+BUBBLE_H = 52
+DOT = 12
+SHOW_MS = 3000          # how long the confirmation stays up
+WATCH_MS = 700          # how often we notice the hub editing settings.json
+
 
 def log(msg: str):
     console.safe_print(f"[colorblind_filter] {msg}", flush=True)
 
 
 def default_settings() -> dict:
-    return {"enabled": False, "filter_name": "Deuteranopia"}
+    return dict(store.DEFAULTS[FEATURE_ID])
 
 
 def load_settings() -> dict:
-    s = default_settings()
-    if SETTINGS_FILE.exists():
-        try:
-            s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-        except Exception as e:
-            log(f"bad settings.json: {e} — using defaults")
-    return s
+    return store.load(FEATURE_ID)
 
 
 def save_settings(settings: dict):
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    store.save(FEATURE_ID, settings)
 
 
 def _read_registry_dword(root, path: str, name: str) -> int | None:
@@ -114,76 +117,85 @@ def set_filter(enabled: bool, filter_type: int):
 
 
 class ColorblindFilterApp(tk.Tk):
+    """The bubble: a dot (colored when on, muted when off) and the filter name."""
+
     def __init__(self):
         super().__init__()
         self.settings = load_settings()
+        self._watcher = store.Watcher(FEATURE_ID)
+        self._hide_after: str | None = None
+
+        self.fonts = ui.FontSet(1.0)
         self.title("Color Blind Filter")
         self.resizable(False, False)
-        self.geometry("340x220")
-        self.configure(bg="#1a1a2e")
-        self.attributes("-topmost", True)
-        self.protocol("WM_DELETE_WINDOW", self._shutdown)
+        self._width = 0
+        self._transparent = False
+        self.canvas: tk.Canvas | None = None
 
-        self._build_ui()
+        self._apply_and_draw()
         save_settings(self.settings)
-        feature_bus.update_presence("colorblind_filter", os.getpid())
+        self.show()
+        self.after(WATCH_MS, self._watch_settings)
+        self.protocol("WM_DELETE_WINDOW", self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
 
-    def _build_ui(self):
-        style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-
-        frame = tk.Frame(self, bg="#1a1a2e")
-        frame.pack(fill="both", expand=True, padx=16, pady=14)
-
-        tk.Label(frame, text="Color Blind Filter", font=("Helvetica", 16, "bold"),
-                 fg="#e0e0ff", bg="#1a1a2e").pack(anchor="w")
-        tk.Label(frame, text="System-wide Windows color filter", font=("Helvetica", 10),
-                 fg="#8a8ab0", bg="#1a1a2e").pack(anchor="w", pady=(0, 12))
-
-        self._enabled_var = tk.BooleanVar(value=bool(self.settings["enabled"]))
-        tk.Checkbutton(frame, text="Enable filter", variable=self._enabled_var,
-                       command=self._apply, fg="#e0e0ff", bg="#1a1a2e",
-                       activebackground="#1a1a2e", activeforeground="#e0e0ff",
-                       selectcolor="#23233f").pack(anchor="w")
-
-        tk.Label(frame, text="Filter type", fg="#e0e0ff", bg="#1a1a2e").pack(anchor="w", pady=(10, 2))
-        self._filter_var = tk.StringVar(value=self.settings["filter_name"])
-        combo = ttk.Combobox(frame, textvariable=self._filter_var,
-                              values=list(FILTER_TYPES), state="readonly")
-        combo.pack(fill="x")
-        combo.bind("<<ComboboxSelected>>", lambda _e: self._apply())
-
-        self.status_var = tk.StringVar()
-        tk.Label(frame, textvariable=self.status_var, fg="#ffd166", bg="#1a1a2e",
-                 wraplength=300, justify="left").pack(anchor="w", pady=(12, 0))
-
+    def _label(self) -> str:
         if not plat.IS_WINDOWS:
-            self.status_var.set("This feature is Windows-only.")
-            combo.configure(state="disabled")
+            return "Windows only"
+        if not self.settings.get("enabled"):
+            return "Filter off"
+        return f"Filter: {self.settings.get('filter_name', 'Deuteranopia')}"
 
-    def _apply(self):
-        try:
-            set_filter(self._enabled_var.get(), FILTER_TYPES[self._filter_var.get()])
-            self.settings["enabled"] = self._enabled_var.get()
-            self.settings["filter_name"] = self._filter_var.get()
-            save_settings(self.settings)
-            self.status_var.set(
-                "Applied. If the screen doesn't change instantly, lock and unlock (Win+L)."
-                if self._enabled_var.get() else "Filter off.")
-            log(f"filter set: enabled={self._enabled_var.get()} type={self._filter_var.get()}")
-        except Exception as e:
-            log(f"apply failed: {e}")
-            self.status_var.set(str(e))
-            messagebox.showerror("Color Blind Filter", str(e))
+    def _rebuild_canvas(self):
+        text_w = self.fonts["ui"].measure(self._label())
+        self._width = 20 * 2 + DOT + 12 + text_w
+        if self.canvas is not None:
+            self.canvas.destroy()
+        self._transparent = ui.make_bubble(self, self._width, BUBBLE_H)
+        self.canvas = ui.bubble_canvas(self, self._width, BUBBLE_H, self._transparent)
+        self.canvas.pack(fill="both", expand=True)
+
+    def _draw(self):
+        self.canvas.delete("all")
+        ui.pill(self.canvas, 1, 1, self._width - 1, BUBBLE_H - 1,
+                fill=C["BUBBLE"], outline=C["BORDER_CTRL"], width=1)
+        cy = BUBBLE_H / 2
+        dot_color = C["ON"] if (plat.IS_WINDOWS and self.settings.get("enabled")) else C["DOT_IDLE"]
+        self.canvas.create_oval(20, cy - DOT / 2, 20 + DOT, cy + DOT / 2,
+                                fill=dot_color, outline="")
+        self.canvas.create_text(20 + DOT + 12, cy, anchor="w",
+                                text=self._label(), font=self.fonts["ui"],
+                                fill=C["FG_BUBBLE"])
+
+    def _apply_and_draw(self):
+        if plat.IS_WINDOWS:
+            try:
+                set_filter(bool(self.settings.get("enabled", False)),
+                          FILTER_TYPES[self.settings.get("filter_name", "Deuteranopia")])
+            except Exception as e:
+                log(f"apply failed: {e}")
+        self._rebuild_canvas()
+        self._draw()
+
+    def show(self):
+        """Bottom-centre, briefly — then out of the way."""
+        ui.place_bottom_center(self, self._width, BUBBLE_H)
+        ui.raise_bubble(self)
+        if self._hide_after:
+            self.after_cancel(self._hide_after)
+        self._hide_after = self.after(SHOW_MS, self.withdraw)
+
+    def _watch_settings(self):
+        if self._watcher.changed():
+            self.settings = load_settings()
+            log(f"settings changed in the hub — {self._label()}")
+            self._apply_and_draw()
+            self.show()
+        self.after(WATCH_MS, self._watch_settings)
 
     def _shutdown(self, *_args):
         log("shutting down")
-        feature_bus.remove_presence("colorblind_filter")
         try:
             self.destroy()
         except Exception:
@@ -193,10 +205,7 @@ class ColorblindFilterApp(tk.Tk):
 
 def main():
     log("feature started")
-    app = ColorblindFilterApp()
-    app.mainloop()
-    feature_bus.remove_presence("colorblind_filter")
-    log("exited")
+    ColorblindFilterApp().mainloop()
 
 
 if __name__ == "__main__":

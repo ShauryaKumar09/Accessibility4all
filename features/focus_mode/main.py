@@ -3,15 +3,21 @@
 Runs as its own process when toggled ON in the hub. Blocks system-wide (not
 just Chrome) by redirecting configured domains to 127.0.0.1 in the OS hosts
 file — works for every browser and app, not just one. Requires admin/root to
-edit the hosts file. The block is removed automatically when the timer ends
-or the feature is toggled off, so it never outlives this process. See
-features/README.md.
+edit the hosts file.
+
+The block-list, duration, and "Blocking now" switch all live in the hub's
+settings sheet (features/README.md / shared/settings_store.py). This process
+watches settings.json (shared.settings_store.Watcher, same mechanism voice
+control's always_on/dictation_mode use) and owns the countdown + auto-unblock
+timer on its own Tk mainloop, since only it stays alive for the whole blocking
+session regardless of whether the settings sheet is open. The block is
+removed automatically when the timer ends, the switch is turned off, or this
+process shuts down, so it never outlives an active session.
 """
 
 from __future__ import annotations
 
 import ctypes
-import json
 import os
 import signal
 import subprocess
@@ -20,34 +26,28 @@ import time
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import font as tkfont, messagebox
 
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, feature_bus, platform as plat  # noqa: E402
+from shared import console, platform as plat, settings_store as store, ui_kit as ui  # noqa: E402
+from shared.ui_kit import C                                                          # noqa: E402
 
 console.configure_stdio()
 
-SETTINGS_FILE = FEATURE_DIR / "settings.json"
+FEATURE_ID = "focus_mode"
 BACKUP_FILE = FEATURE_DIR / "hosts_backup.txt"
 HOSTS_PATH = (Path(r"C:\Windows\System32\drivers\etc\hosts") if plat.IS_WINDOWS
               else Path("/etc/hosts"))
 MARK_BEGIN = "# BEGIN Accessibility4all Focus Mode"
 MARK_END = "# END Accessibility4all Focus Mode"
 
-BG = "#1a1a2e"
-CARD = "#23233f"
-FG = "#e0e0ff"
-MUTED = "#8a8ab0"
-ACCENT = "#748ffc"
-OK = "#69db7c"
-WARN = "#ffd166"
-REC = "#ff6b6b"
-
-WIN_W, WIN_H = 360, 340
+BUBBLE_H = 52
+DOT = 12
+WATCH_MS = 700
+TICK_MS = 1000
 
 
 def log(msg: str):
@@ -55,21 +55,15 @@ def log(msg: str):
 
 
 def default_settings() -> dict:
-    return {"blocklist": ["youtube.com", "twitter.com", "reddit.com"], "duration_minutes": 25}
+    return dict(store.DEFAULTS[FEATURE_ID])
 
 
 def load_settings() -> dict:
-    s = default_settings()
-    if SETTINGS_FILE.exists():
-        try:
-            s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-        except Exception as e:
-            log(f"bad settings.json: {e} — using defaults")
-    return s
+    return store.load(FEATURE_ID)
 
 
 def save_settings(settings: dict):
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    store.save(FEATURE_ID, settings)
 
 
 def is_admin() -> bool:
@@ -137,136 +131,125 @@ def remove_block():
 
 
 class FocusModeApp(tk.Tk):
+    """The bubble: hidden while idle, a pill with a live countdown while blocking."""
+
     def __init__(self):
         super().__init__()
         self.settings = load_settings()
+        self._watcher = store.Watcher(FEATURE_ID)
         self._active = False
         self._end_time = 0.0
-        self._tick_id = None
+        self._tick_id: str | None = None
 
+        self.fonts = ui.FontSet(1.0)
         self.title("Focus Mode")
         self.resizable(False, False)
-        self.geometry(f"{WIN_W}x{WIN_H}")
-        self.configure(bg=BG)
-        self.attributes("-topmost", True)
-        self.protocol("WM_DELETE_WINDOW", self._shutdown)
+        self.withdraw()
+        self._width = 0
+        self.canvas: tk.Canvas | None = None
 
-        self._build_ui()
-        save_settings(self.settings)
         self._cleanup_stale_block()
-        feature_bus.update_presence("focus_mode", os.getpid())
+        if bool(self.settings.get("active", False)):
+            self._begin_session(resuming=True)
+        save_settings(self.settings)
+        self.after(WATCH_MS, self._watch_settings)
+        self.protocol("WM_DELETE_WINDOW", self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
 
     def _cleanup_stale_block(self):
-        """Clear any block left over from a previous crash, since no timer owns it now."""
+        """Clear a block left over from a previous crash if we're not resuming it."""
         try:
-            if HOSTS_PATH.exists() and MARK_BEGIN in HOSTS_PATH.read_text(
-                    encoding="utf-8", errors="ignore") and is_admin():
+            has_block = HOSTS_PATH.exists() and MARK_BEGIN in HOSTS_PATH.read_text(
+                encoding="utf-8", errors="ignore")
+            if has_block and not self.settings.get("active") and is_admin():
                 remove_block()
                 log("cleared stale block from a previous session")
         except Exception as e:
             log(f"stale-block cleanup skipped: {e}")
 
-    def _build_ui(self):
-        frame = tk.Frame(self, bg=BG)
-        frame.pack(fill="both", expand=True, padx=16, pady=14)
+    # ── bubble drawing ──
+    def _rebuild_canvas(self, text: str):
+        text_w = self.fonts["ui"].measure(text)
+        self._width = 20 * 2 + DOT + 12 + text_w
+        if self.canvas is not None:
+            self.canvas.destroy()
+        transparent = ui.make_bubble(self, self._width, BUBBLE_H)
+        self.canvas = ui.bubble_canvas(self, self._width, BUBBLE_H, transparent)
+        self.canvas.pack(fill="both", expand=True)
 
-        tk.Label(frame, text="Focus Mode", font=tkfont.Font(family="Helvetica", size=16, weight="bold"),
-                 fg=FG, bg=BG).pack(anchor="w")
-        tk.Label(frame, text="Blocks sites system-wide via the hosts file",
-                 font=tkfont.Font(family="Helvetica", size=10), fg=MUTED, bg=BG).pack(
-            anchor="w", pady=(0, 10))
+    def _draw(self, text: str):
+        self._rebuild_canvas(text)
+        ui.pill(self.canvas, 1, 1, self._width - 1, BUBBLE_H - 1,
+                fill=C["BUBBLE"], outline=C["ACCENT"], width=1)
+        cy = BUBBLE_H / 2
+        self.canvas.create_oval(20, cy - DOT / 2, 20 + DOT, cy + DOT / 2,
+                                fill=C["STOP_BORDER"], outline="")
+        self.canvas.create_text(20 + DOT + 12, cy, anchor="w",
+                                text=text, font=self.fonts["ui"], fill=C["FG_BUBBLE"])
+        ui.place_bottom_center(self, self._width, BUBBLE_H)
+        ui.raise_bubble(self)
 
-        if not is_admin():
-            tk.Label(frame, text="Not running as Administrator — blocking will fail. "
-                                  "Restart the hub as Administrator.",
-                     font=tkfont.Font(family="Helvetica", size=9), fg=WARN, bg=BG,
-                     wraplength=WIN_W - 32, justify="left").pack(anchor="w", pady=(0, 10))
-
-        tk.Label(frame, text="Blocked sites (one per line)", fg=FG, bg=BG,
-                 font=tkfont.Font(family="Helvetica", size=9)).pack(anchor="w")
-        self._blocklist_text = tk.Text(frame, height=5, width=36, bg=CARD, fg=FG,
-                                        insertbackground=FG, relief="flat")
-        self._blocklist_text.pack(fill="x", pady=(2, 8))
-        self._blocklist_text.insert("1.0", "\n".join(self.settings["blocklist"]))
-
-        duration_row = tk.Frame(frame, bg=BG)
-        duration_row.pack(fill="x", pady=(0, 10))
-        tk.Label(duration_row, text="Duration (minutes)", fg=FG, bg=BG,
-                 font=tkfont.Font(family="Helvetica", size=9)).pack(side="left")
-        self._duration_var = tk.IntVar(value=int(self.settings["duration_minutes"]))
-        tk.Spinbox(duration_row, from_=1, to=480, textvariable=self._duration_var,
-                   width=6, bg=CARD, fg=FG, relief="flat",
-                   buttonbackground=CARD).pack(side="right")
-
-        self._toggle_btn = tk.Button(frame, text="Start focus session", command=self._toggle,
-                                      font=tkfont.Font(family="Helvetica", size=10, weight="bold"),
-                                      bg=CARD, fg=FG, relief="flat", padx=14, pady=8,
-                                      cursor="hand2")
-        self._toggle_btn.pack(fill="x")
-
-        self.status_var = tk.StringVar(value="Idle")
-        tk.Label(frame, textvariable=self.status_var,
-                 font=tkfont.Font(family="Helvetica", size=11, weight="bold"),
-                 fg=MUTED, bg=BG, wraplength=WIN_W - 32, justify="left").pack(
-            anchor="w", pady=(12, 0))
-
-    def _domains(self) -> list[str]:
-        raw = self._blocklist_text.get("1.0", "end").strip()
-        return [d.strip() for d in raw.splitlines() if d.strip()]
-
-    def _toggle(self):
-        if self._active:
-            self._stop_session()
-        else:
-            self._start_session()
-
-    def _start_session(self):
-        domains = self._domains()
-        if not domains:
-            self.status_var.set("Add at least one site to block")
-            return
-        minutes = max(1, int(self._duration_var.get()))
+    # ── session lifecycle ──
+    def _begin_session(self, resuming: bool = False):
+        domains = self.settings.get("blocklist", [])
+        minutes = max(1, int(self.settings.get("duration_minutes", 25)))
+        end_time = float(self.settings.get("end_time", 0.0))
+        if not resuming or end_time <= time.time():
+            end_time = time.time() + minutes * 60
         try:
             apply_block(domains)
         except Exception as e:
             log(f"apply_block failed: {e}")
-            messagebox.showerror("Focus Mode", str(e))
+            self.settings["active"] = False
+            save_settings(self.settings)
             return
-        self.settings["blocklist"] = domains
-        self.settings["duration_minutes"] = minutes
-        save_settings(self.settings)
         self._active = True
-        self._end_time = time.time() + minutes * 60
-        self._toggle_btn.configure(text="Stop focus session")
+        self._end_time = end_time
+        self.settings["active"] = True
+        self.settings["end_time"] = end_time
+        save_settings(self.settings)
+        log(f"blocking {len(domains)} site(s) until {time.ctime(end_time)}")
         self._tick()
-        log(f"blocking {len(domains)} site(s) for {minutes} minute(s)")
 
-    def _stop_session(self):
+    def _end_session(self, reason: str):
         try:
             remove_block()
         except Exception as e:
             log(f"remove_block failed: {e}")
-            messagebox.showerror("Focus Mode", str(e))
         self._active = False
         if self._tick_id:
             self.after_cancel(self._tick_id)
             self._tick_id = None
-        self._toggle_btn.configure(text="Start focus session")
-        self.status_var.set("Stopped")
+        self.settings["active"] = False
+        self.settings["end_time"] = 0.0
+        save_settings(self.settings)
+        log(f"session ended: {reason}")
+        self.withdraw()
 
     def _tick(self):
         if not self._active:
             return
         remaining = self._end_time - time.time()
         if remaining <= 0:
-            self._stop_session()
-            self.status_var.set("Session complete")
+            self._end_session("timer elapsed")
             return
         mins, secs = divmod(int(remaining), 60)
-        self.status_var.set(f"Blocking — {mins}m {secs}s remaining")
-        self._tick_id = self.after(1000, self._tick)
+        self._draw(f"Blocking — {mins}m {secs}s")
+        self._tick_id = self.after(TICK_MS, self._tick)
+
+    # ── settings (edited in the hub) ──
+    def _watch_settings(self):
+        if self._watcher.changed():
+            self.settings = load_settings()
+            want_active = bool(self.settings.get("active", False))
+            if want_active and not self._active:
+                log("settings changed in the hub — starting session")
+                self._begin_session()
+            elif not want_active and self._active:
+                log("settings changed in the hub — stopping session")
+                self._end_session("turned off in the hub")
+        self.after(WATCH_MS, self._watch_settings)
 
     def _shutdown(self, *_args):
         log("shutting down")
@@ -275,7 +258,9 @@ class FocusModeApp(tk.Tk):
                 remove_block()
             except Exception as e:
                 log(f"could not clear block on shutdown: {e}")
-        feature_bus.remove_presence("focus_mode")
+            self.settings["active"] = False
+            self.settings["end_time"] = 0.0
+            save_settings(self.settings)
         try:
             self.destroy()
         except Exception:
@@ -285,10 +270,7 @@ class FocusModeApp(tk.Tk):
 
 def main():
     log("feature started")
-    app = FocusModeApp()
-    app.mainloop()
-    feature_bus.remove_presence("focus_mode")
-    log("exited")
+    FocusModeApp().mainloop()
 
 
 if __name__ == "__main__":

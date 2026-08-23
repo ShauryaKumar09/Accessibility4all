@@ -1356,6 +1356,7 @@ class App(tk.Tk):
         self._recorder = PushToTalkRecorder()
         self._always_listener: AlwaysOnListener | None = None
         self._always_on = bool(self.settings.get("always_on", False))
+        self._dictation_mode = bool(self.settings.get("dictation_mode", False))
         self._recording = False
         self._busy = False        # True while transcribing / acting on a command
         self._reset_after = None  # pending "reset to idle" timer id
@@ -1553,6 +1554,10 @@ class App(tk.Tk):
                     self._stop_always_on()
                     if not self._busy and not self._recording:
                         self._reset_idle()
+            dictation_mode = bool(self.settings.get("dictation_mode", False))
+            if dictation_mode != self._dictation_mode:
+                log("SETTINGS", f"dictation mode -> {dictation_mode} (changed in the hub)")
+                self._dictation_mode = dictation_mode
         self.after(SETTINGS_WATCH_MS, self._watch_settings)
 
     def _start_always_on(self):
@@ -1847,6 +1852,17 @@ class App(tk.Tk):
             trial["command"] = command
             self._set_status("Heard you", MUTED)
             self._chat_say("you", command)
+
+            if self._dictation_mode:
+                plat.paste_text(command)
+                preview = command if len(command) <= 60 else command[:57] + "…"
+                self._set_status(f"Typed: {preview}", OK)
+                self._chat_say("ok", f"Typed: {command}")
+                trial["dictated"] = True
+                trial["success"] = True
+                _log_trial(trial)
+                self._schedule_reset()
+                return
 
             if not _should_process_command(command):
                 log("PIPELINE", f"ignored non-command speech: {command!r}", "WARN")
