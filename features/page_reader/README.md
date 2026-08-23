@@ -42,15 +42,23 @@ Toggle **Page Reader** ON in the hub (`python hub.py`).
 | Stop speaking | Default hotkey **F10** |
 | Read a section by voice | Voice Control ON + “Voice-guided sections” → e.g. “read the billing information” |
 | Read last section | “read that again” (via Voice Control) |
-| Hover-to-read | Enable in settings, pause the mouse over text (~0.5s) |
+| Hover-to-read | Turn on "Read when I rest the pointer" in the hub, then pause the mouse over text (~0.5s) |
+| Pause / resume | The round button on the bubble |
 
-No on-screen read/stop buttons — use hotkeys or voice.
+While reading, a small bubble sits at the bottom of the screen showing the line
+being read and how far through it is. That is its whole UI — one button.
 
 ## Settings
 
-Saved to `settings.json` in this folder (created on first run):
+All settings live in the **hub**: open Accessibility4all and press **Settings**
+on the Page Reader row. They are saved to `settings.json` in this folder and the
+running feature picks up changes within a second.
 
-- Voice-guided sections
-- Hover-to-read
-- Custom hotkeys (supports Ctrl/Command, Alt/Option, Shift, and function keys)
-- Speech rate (default 120 wpm — slower than before)
+- "Let me pick sections by voice" (voice-guided sections)
+- "Read when I rest the pointer" (hover-to-read)
+- "Skip the clutter" (Groq summary — important content only)
+- Start reading / Stop reading shortcut keys (Ctrl/Command, Alt/Option, Shift,
+  and function keys)
+- Speech rate (`tts_rate` in `settings.json`)
+
+Press **Show me how to use it** in the same sheet for a three-step walkthrough.

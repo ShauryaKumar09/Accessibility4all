@@ -21,7 +21,7 @@ python hub.py
 | **Voice Control** | Hold-to-talk commands for Google Chrome (shortcuts + OCR + AI) |
 | **Page Reader** | Read on-screen text aloud (hotkeys, voice, click-to-read) |
 
-Click **Rescan features** in the hub after adding a new feature folder.
+Restart the hub after adding a new feature folder so it is discovered.
 
 ## Platform notes
 

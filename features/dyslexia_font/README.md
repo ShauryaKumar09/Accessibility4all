@@ -21,7 +21,8 @@ automation for changing page text.
 
 3. Toggle **Dyslexia Font** ON.
 
-4. In the Dyslexia Font window, click **Open extension folder**.
+4. In the hub, press **Settings** on the Dyslexia Font row, then click
+   **Open the extension folder**.
 
 5. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click
    **Load unpacked**, and select:
@@ -47,16 +48,23 @@ The default font stack tries `OpenDyslexic`, then `Atkinson Hyperlegible`, then
 `Comic Sans MS`, then Arial. Install your preferred font in Windows for best
 results.
 
+## Choosing the font
+
+The font picker, letter spacing, line height and live preview are all in the
+**hub**: open Accessibility4all and press **Settings** on the Dyslexia Font row.
+When the feature is on it shows only a small "Easier font on" pill on the
+desktop, which hides itself after a few seconds.
+
 ## Windows App Font Substitution
 
-The Windows section in the feature window can check whether a selected font is
+The Windows section of that settings sheet can check whether a selected font is
 installed. It also includes an experimental opt-in substitution helper.
 
 Important limits:
 
 - It writes only after you confirm.
 - It stores a backup in this feature folder.
-- Use **Restore Windows fonts** to remove substitutions made by this feature.
+- Use **Put the Windows fonts back** to remove substitutions made by this feature.
 - Some apps ignore Windows font substitution because they bundle fonts, render
   custom UI, or run inside webviews.
 - You may need to sign out or restart Windows before changes are visible.

@@ -5,33 +5,32 @@ Runs as its own process when toggled ON in the hub. See features/README.md.
 
 from __future__ import annotations
 
-import asyncio
-import io
 import json
 import os
 import queue
 import re
 import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
-import edge_tts
-import sounddevice as sd
-import soundfile as sf
+import pyttsx3
 import tkinter as tk
 from dotenv import load_dotenv
 from groq import Groq
 from pynput import keyboard, mouse
-from tkinter import font as tkfont, ttk
 
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, feature_bus, groq_vision, platform as plat, screen_ocr  # noqa: E402
+from shared import (console, feature_bus, groq_vision, platform as plat,  # noqa: E402
+                    screen_ocr, settings_store as store, ui_kit as ui)
+from shared.ui_kit import C  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
@@ -41,17 +40,6 @@ SETTINGS_FILE = FEATURE_DIR / "settings.json"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT = 30
 MAX_ELEMENTS = 120
-
-READING_LEVELS = {
-    "Normal": "",
-    "5th grade": ("Explain it the way you would to a 10-year-old: "
-                  "short sentences, common words, no jargon."),
-    "Middle school": ("Use clear, plain language a middle-schooler would understand; "
-                       "define any unavoidable technical terms."),
-    "Plain adult": ("Rewrite in plain, jargon-free adult language "
-                     "— clear and concise, no unnecessary complexity."),
-}
-READING_LEVEL_ORDER = ["Normal", "5th grade", "Middle school", "Plain adult"]
 READ_SECTION_PROMPT = """You pick which OCR lines to read aloud for a blind user.
 
 You get a numbered list of EXACT text lines from the screen and what the user asked to hear.
@@ -70,18 +58,26 @@ _SECTION_SKIP = re.compile(
     re.I,
 )
 
-BG = "#1a1a2e"
-CARD = "#23233f"
-FG = "#e0e0ff"
-MUTED = "#8a8ab0"
-ACCENT = "#748ffc"
-OK = "#69db7c"
-WARN = "#ffd166"
-REC = "#ff6b6b"
+# The bubble replaces the old 300x248 window: one button, one line, one bar.
+BG = C["BUBBLE"]
+FG = C["FG_BUBBLE"]
+MUTED = C["FG_MUTED"]
+ACCENT = C["ACCENT"]
+OK = C["ON"]
+WARN = C["WARM_TEXT"]
+REC = C["STOP_BORDER"]
 
-WIN_W, WIN_H = 300, 248
-VC_W, VC_H = 300, 176
+BUBBLE_H = 64
+BUTTON_D = 48
+COLUMN_W = 260
+PAD = 12
+GAP = 16
+WIN_W = PAD * 2 + BUTTON_D + GAP + COLUMN_W
+WIN_H = BUBBLE_H
+VC_H = 60                 # the voice bubble's height, for stacking
 MARGIN = 12
+IDLE_LINE = "Press {key} to read the screen"
+SETTINGS_WATCH_MS = 700
 
 
 def log(msg: str):
@@ -89,7 +85,7 @@ def log(msg: str):
 
 
 def default_settings() -> dict:
-    return dict(feature_bus.DEFAULT_PAGE_READER_SETTINGS)
+    return dict(store.DEFAULTS["page_reader"])
 
 
 def load_settings() -> dict:
@@ -138,29 +134,6 @@ def hotkey_to_pynput(spec: str) -> str | None:
     return "+".join(out) if out else None
 
 
-def format_hotkey_from_event(key, modifiers: set) -> str:
-    parts = []
-    if keyboard.Key.ctrl_l in modifiers or keyboard.Key.ctrl_r in modifiers:
-        parts.append("ctrl")
-    if keyboard.Key.alt_l in modifiers or keyboard.Key.alt_r in modifiers:
-        parts.append("alt")
-    if keyboard.Key.shift_l in modifiers or keyboard.Key.shift_r in modifiers:
-        parts.append("shift")
-    if keyboard.Key.cmd in modifiers or keyboard.Key.cmd_r in modifiers:
-        parts.append("command")
-    if hasattr(key, "char") and key.char and key.char.isprintable():
-        parts.append(key.char.lower())
-    elif hasattr(key, "name") and key.name:
-        name = key.name.replace("_l", "").replace("_r", "")
-        if name in ("ctrl", "alt", "shift", "cmd"):
-            return "+".join(parts) if parts else ""
-        if name.startswith("f") and name[1:].isdigit():
-            parts.append(name.upper())
-        else:
-            parts.append(name)
-    return "+".join(parts)
-
-
 def _norm_words(s: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]+", s.lower()) if len(w) > 2]
 
@@ -198,97 +171,253 @@ def _match_section_local(query: str, elements: list[dict]) -> list[dict] | None:
     return ordered[lo:hi + 1]
 
 
-DEFAULT_TTS_VOICE = "en-US-AvaMultilingualNeural"
-
-
 class Speaker:
-    """Killable TTS — neural voices via edge-tts, played through sounddevice."""
+    """Killable TTS — Windows uses SAPI subprocess; macOS uses pyttsx3."""
 
     _STOP = object()
 
-    def __init__(self, rate: int = 145, volume: float = 1.0, voice: str = DEFAULT_TTS_VOICE):
+    def __init__(self, rate: int = 70, volume: float = 1.0):
         self._rate = rate
         self._volume = volume
-        self._voice = voice
         self._gen = 0
+        # What is being read, so the bubble can show the line and how far in we
+        # are, and so pause can resume from the same place.
+        self._lines: list[str] = []
+        self._pos = 0
+        self._paused = False
+        self._busy = False
+        self.on_progress = None        # called from the TTS thread: (pos, total, text)
+        self._proc: subprocess.Popen | None = None
+        self._proc_lock = threading.Lock()
         self._q: queue.Queue = queue.Queue()
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        self._engine = None
+        self._thread = None
+        if plat.IS_WINDOWS:
+            self._thread = threading.Thread(target=self._run_windows, daemon=True)
+        else:
+            self._thread = threading.Thread(target=self._run_pyttsx3, daemon=True)
+        self._started = False
 
-    def _edge_rate(self) -> str:
-        """Map configured rate (~80-220 wpm) to edge-tts percent (0% = ~175 wpm)."""
-        pct = max(-50, min(50, round((self._rate - 175) / 175 * 100)))
-        return f"{pct:+d}%"
+    def start(self):
+        """Start the TTS worker.
 
-    async def _synth(self, text: str) -> bytes:
-        communicate = edge_tts.Communicate(text, voice=self._voice, rate=self._edge_rate())
-        buf = bytearray()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                buf.extend(chunk["data"])
-        return bytes(buf)
+        Deliberately NOT started in __init__: on macOS pyttsx3 spins up AppKit
+        speech objects on this thread, and doing that while the main thread is
+        still creating the Tk window intermittently deadlocks before the bubble
+        is ever mapped. The app starts us once its window is up.
+        """
+        if not self._started:
+            self._started = True
+            self._thread.start()
 
-    def _run(self):
-        asyncio.set_event_loop(self._loop)
+    def _sapi_rate(self) -> int:
+        """Map configured rate (~80–220) to Windows SAPI -10..10 (0 = normal)."""
+        return max(-10, min(10, int((self._rate - 150) / 12)))
+
+    def _kill_proc(self):
+        with self._proc_lock:
+            if self._proc is None:
+                return
+            try:
+                if self._proc.poll() is None:
+                    self._proc.kill()
+                    self._proc.wait(timeout=1)
+            except Exception:
+                pass
+            self._proc = None
+
+    def _speak_windows(self, text: str) -> bool:
+        """Start speech in a subprocess that stop() can kill immediately."""
+        self._kill_proc()
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8",
+        )
+        try:
+            tmp.write(text)
+            tmp.close()
+            path = tmp.name.replace("\\", "/")
+            rate = self._sapi_rate()
+            ps = (
+                f"$t = Get-Content -LiteralPath '{path}' -Raw -Encoding UTF8; "
+                "Add-Type -AssemblyName System.Speech; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                f"$s.Rate = {rate}; "
+                "$s.Speak($t); "
+                f"Remove-Item -LiteralPath '{path}' -Force"
+            )
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            with self._proc_lock:
+                self._proc = subprocess.Popen(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                    creationflags=flags,
+                )
+            return True
+        except Exception as e:
+            log(f"TTS spawn error: {e}")
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+            return False
+
+    def _report(self, pos: int, text: str):
+        self._pos = pos
+        if self.on_progress:
+            try:
+                self.on_progress(pos, len(self._lines), text)
+            except Exception:
+                pass
+
+    def _run_windows(self):
         while True:
             item = self._q.get()
             if item is self._STOP:
-                self._loop.close()
                 break
             if not item:
                 continue
+            pos, text = item
             gen = self._gen
-            try:
-                mp3 = self._loop.run_until_complete(self._synth(item))
-                data, sr = sf.read(io.BytesIO(mp3), dtype="float32")
-            except Exception as e:
-                log(f"TTS synth error: {e}")
+            self._busy = True
+            self._report(pos, text)
+            if not self._speak_windows(text):
+                self._busy = False
                 continue
-            if gen != self._gen or data is None or len(data) == 0:
-                continue
-            data = data * self._volume
-            sd.play(data, sr)
             while True:
-                stream = sd.get_stream()
-                if stream is None or not stream.active:
+                with self._proc_lock:
+                    proc = self._proc
+                if proc is None:
+                    break
+                if proc.poll() is not None:
                     break
                 if gen != self._gen:
-                    sd.stop()
+                    self._kill_proc()
                     break
-                time.sleep(0.03)
+                time.sleep(0.05)
+            self._busy = False
 
-    def configure(self, rate: int, volume: float, voice: str | None = None):
+    def _init_pyttsx3(self):
+        eng = pyttsx3.init()
+        eng.setProperty("rate", self._rate)
+        eng.setProperty("volume", self._volume)
+        try:
+            for voice in eng.getProperty("voices") or []:
+                name = (voice.name or "").lower()
+                vid = (voice.id or "").lower()
+                if any(t in name or t in vid for t in ("zira", "david", "samantha", "karen")):
+                    eng.setProperty("voice", voice.id)
+                    break
+        except Exception:
+            pass
+        return eng
+
+    def _run_pyttsx3(self):
+        self._engine = self._init_pyttsx3()
+        while True:
+            item = self._q.get()
+            if item is self._STOP:
+                break
+            if not item:
+                continue
+            pos, text = item
+            gen = self._gen
+            self._busy = True
+            self._report(pos, text)
+            try:
+                self._engine.say(text)
+                self._engine.runAndWait()
+            except Exception as e:
+                log(f"TTS error: {e}")
+                try:
+                    self._engine = self._init_pyttsx3()
+                except Exception:
+                    pass
+            self._busy = False
+            if gen != self._gen:
+                try:
+                    self._engine.stop()
+                    self._engine = self._init_pyttsx3()
+                except Exception:
+                    pass
+
+    def configure(self, rate: int, volume: float):
         self._rate, self._volume = rate, volume
-        if voice:
-            self._voice = voice
+        if self._engine:
+            self._engine.setProperty("rate", rate)
+            self._engine.setProperty("volume", volume)
 
     def speak_lines(self, lines: list[str]):
         self.stop()
-        gen = self._gen
-        for line in lines:
-            if line.strip() and gen == self._gen:
-                self._q.put(line.strip())
+        self._lines = [line.strip() for line in lines if line.strip()]
+        self._pos = 0
+        self._paused = False
+        self._enqueue_from(0)
 
     def speak_one(self, text: str):
         """Stop everything and speak a single line (hover)."""
-        self.stop()
-        if text.strip():
-            self._q.put(text.strip())
+        self.speak_lines([text])
 
-    def stop(self):
+    def _enqueue_from(self, start: int):
+        gen = self._gen
+        for i in range(start, len(self._lines)):
+            if gen != self._gen:
+                return
+            self._q.put((i, self._lines[i]))
+
+    def _halt(self):
+        """Silence the engine now, without forgetting what we were reading."""
         self._gen += 1
-        sd.stop()
+        self._kill_proc()
         try:
             while True:
                 self._q.get_nowait()
         except queue.Empty:
             pass
+        if self._engine:
+            try:
+                self._engine.stop()
+            except Exception:
+                pass
+        self._busy = False
+
+    def pause(self):
+        if self._paused or not self._lines:
+            return
+        self._paused = True
+        self._halt()
+
+    def resume(self):
+        if not self._paused:
+            return
+        self._paused = False
+        self._enqueue_from(self._pos)
+
+    def toggle_pause(self):
+        self.resume() if self._paused else self.pause()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def state(self) -> str:
+        """`reading`, `paused`, or `idle` — what the bubble button shows."""
+        if self._paused:
+            return "paused"
+        if self._busy or not self._q.empty():
+            return "reading"
+        return "idle"
+
+    def progress(self) -> tuple[int, int]:
+        return self._pos + 1 if self._lines else 0, len(self._lines)
+
+    def stop(self):
+        self._halt()
+        self._lines = []
+        self._pos = 0
+        self._paused = False
 
     def shutdown(self):
         self.stop()
         self._q.put(self._STOP)
-        self._thread.join(timeout=2)
 
 
 class PageReaderApp(tk.Tk):
@@ -305,24 +434,25 @@ class PageReaderApp(tk.Tk):
         self._hover_gen = 0
         self._last_hover_text = ""
         self._last_hover_pos: tuple[int, int] | None = None
-        self._capture_listener = None
-        self._capture_target: str | None = None
-        self._modifiers: set = set()
         self._groq: Groq | None = None
+        self._watcher = store.Watcher("page_reader")
 
         self._speaker = Speaker(
             rate=int(self.settings.get("tts_rate", 145)),
             volume=float(self.settings.get("tts_volume", 1.0)),
-            voice=self.settings.get("tts_voice", DEFAULT_TTS_VOICE),
         )
 
         self._build_ui()
+        # the speech engine only starts once the window exists (see Speaker.start)
+        self.after(400, self._speaker.start)
         save_settings(self.settings)
         self._position_window()
         self._update_presence()
         self._register_hotkeys()
         self._update_hover_listener()
         self._start_bus_listener()
+        self.after(SETTINGS_WATCH_MS, self._watch_settings)
+        self.after(120, lambda: ui.raise_bubble(self))
 
         self.bind("<Configure>", self._on_configure)
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -337,106 +467,112 @@ class PageReaderApp(tk.Tk):
         return self._groq
 
     def _build_ui(self):
+        """The bubble: a pause/resume button, the line being read, a progress bar.
+
+        Everything that used to be here — three checkboxes and two hotkey rows —
+        now lives in the hub's Page Reader settings sheet.
+        """
         self.title("Page Reader")
         self.resizable(False, False)
-        self.configure(bg=BG)
-        self.attributes("-topmost", True)
+        self.fonts = ui.FontSet(1.0)
+        self._transparent = ui.make_bubble(self, WIN_W, WIN_H)
+        self.canvas = ui.bubble_canvas(self, WIN_W, WIN_H, self._transparent)
+        self.canvas.pack(fill="both", expand=True)
 
-        tk.Label(self, text="Page Reader",
-                 font=tkfont.Font(family="Helvetica", size=11, weight="bold"),
-                 fg=FG, bg=BG).pack(anchor="w", padx=14, pady=(10, 4))
+        self._button = ui.CircleButton(
+            self.canvas, BUTTON_D, "play", command=self._on_button,
+            fill=C["ACCENT_FILL"], border=C["ACCENT"], glyph=C["ACCENT_ON"])
+        self.canvas.create_window(PAD, WIN_H / 2, window=self._button,
+                                  anchor="w")
 
-        toggles = tk.Frame(self, bg=BG)
-        toggles.pack(fill="x", padx=14)
+        self._line = self._idle_line()
+        self._fraction = 0.0
+        self._line_color = C["FG_BUBBLE"]
+        self._speaker.on_progress = self._on_progress
+        self._draw()
 
-        self._voice_var = tk.BooleanVar(value=self.settings.get("voice_guided", True))
-        tk.Checkbutton(toggles, text="Voice-guided sections (needs Voice Control)",
-                       variable=self._voice_var, command=self._on_toggle_change,
-                       font=tkfont.Font(family="Helvetica", size=9),
-                       fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
-                       activeforeground=FG).pack(anchor="w")
+    def _idle_line(self) -> str:
+        return IDLE_LINE.format(key=self.settings["hotkeys"]["read_screen"])
 
-        self._hover_var = tk.BooleanVar(value=self.settings.get("hover_to_read", False))
-        tk.Checkbutton(toggles, text="Hover-to-read (pause over text)",
-                       variable=self._hover_var, command=self._on_toggle_change,
-                       font=tkfont.Font(family="Helvetica", size=9),
-                       fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
-                       activeforeground=FG).pack(anchor="w")
+    def _draw(self):
+        self.canvas.delete("bubble")
+        ui.pill(self.canvas, 1, 1, WIN_W - 1, WIN_H - 1, fill=C["BUBBLE"],
+                outline=C["BORDER_CTRL"], width=1, tags="bubble")
+        self.canvas.tag_lower("bubble")
 
-        self._groq_var = tk.BooleanVar(value=self.settings.get("use_groq_summary", True))
-        tk.Checkbutton(toggles, text="Groq summary (important content only)",
-                       variable=self._groq_var, command=self._on_toggle_change,
-                       font=tkfont.Font(family="Helvetica", size=9),
-                       fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
-                       activeforeground=FG).pack(anchor="w")
+        col_x = PAD + BUTTON_D + GAP
+        text = ui.ellipsize(self.fonts["ui"], self._line, COLUMN_W)
+        self.canvas.create_text(col_x, WIN_H / 2 - 10, anchor="w", text=text,
+                                font=self.fonts["ui"], fill=self._line_color,
+                                tags="bubble")
+        ui.progress_bar(self.canvas, col_x, WIN_H / 2 + 9, col_x + COLUMN_W, 5,
+                        self._fraction, tags="bubble")
+        state = self._speaker.state()
+        self._button.set_style(kind="pause" if state == "reading" else "play")
 
-        level_row = tk.Frame(self, bg=BG)
-        level_row.pack(fill="x", padx=14, pady=(4, 0))
-        tk.Label(level_row, text="Reading level:", font=tkfont.Font(family="Helvetica", size=9),
-                 fg=MUTED, bg=BG).pack(side="left")
-        self._level_var = tk.StringVar(value=self.settings.get("reading_level", "Normal"))
-        level_combo = ttk.Combobox(level_row, textvariable=self._level_var,
-                                    values=READING_LEVEL_ORDER, state="readonly", width=13)
-        level_combo.pack(side="left", padx=(6, 0))
-        level_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_toggle_change())
+    def _on_button(self):
+        """One button: pause what is being read, or start the screen fresh."""
+        state = self._speaker.state()
+        if state == "idle":
+            self.cmd_read_screen()
+        else:
+            self._speaker.toggle_pause()
+            if self._speaker.paused:
+                self._set_status("Paused", MUTED)
+            else:
+                self._set_status(self._line, C["FG_BUBBLE"])
+        self._draw()
 
-        hk_frame = tk.Frame(self, bg=BG)
-        hk_frame.pack(fill="x", padx=14, pady=(8, 0))
+    def _on_progress(self, pos: int, total: int, text: str):
+        """Called on the TTS thread — marshal onto the main thread."""
+        def _apply():
+            self._line = text
+            self._line_color = C["FG_BUBBLE"]
+            self._fraction = (pos + 1) / total if total else 0.0
+            self._draw()
+        self.after(0, _apply)
 
-        self._read_hk_var = tk.StringVar(value=self.settings["hotkeys"]["read_screen"])
-        self._stop_hk_var = tk.StringVar(value=self.settings["hotkeys"]["stop"])
-        self._add_hotkey_row(hk_frame, "Read Chrome:", self._read_hk_var, "read_screen")
-        self._add_hotkey_row(hk_frame, "Stop:", self._stop_hk_var, "stop")
-
-        self.status_var = tk.StringVar(value="Idle")
-        self.status_label = tk.Label(self, textvariable=self.status_var,
-                 font=tkfont.Font(family="Helvetica", size=13, weight="bold"),
-                 fg=MUTED, bg=BG, wraplength=WIN_W - 28, justify="left",
-                 anchor="w")
-        self.status_label.pack(fill="x", padx=14, pady=(10, 8))
-
-        tk.Label(self, text="Use hotkeys or voice — no on-screen buttons.",
-                 font=tkfont.Font(family="Helvetica", size=8),
-                 fg="#5a5a78", bg=BG).pack(anchor="w", padx=14, pady=(0, 8))
-
-    def _add_hotkey_row(self, parent, label: str, var: tk.StringVar, key: str):
-        row = tk.Frame(parent, bg=BG)
-        row.pack(fill="x", pady=2)
-        tk.Label(row, text=label, width=12, anchor="w",
-                 font=tkfont.Font(family="Helvetica", size=9),
-                 fg=MUTED, bg=BG).pack(side="left")
-        tk.Label(row, textvariable=var,
-                 font=tkfont.Font(family="Helvetica", size=9, weight="bold"),
-                 fg=FG, bg=BG, width=14, anchor="w").pack(side="left")
-        tk.Button(row, text="Set", command=lambda: self._start_hotkey_capture(key),
-                  font=tkfont.Font(family="Helvetica", size=8),
-                  bg=CARD, fg=FG, relief="flat", padx=6, cursor="hand2").pack(side="right")
+    def _watch_settings(self):
+        """Pick up edits the hub made to settings.json while we were running."""
+        if self._watcher.changed():
+            self.settings = load_settings()
+            log("settings changed in the hub — reapplying")
+            self._speaker.configure(int(self.settings.get("tts_rate", 145)),
+                                    float(self.settings.get("tts_volume", 1.0)))
+            self._register_hotkeys()
+            self._update_hover_listener()
+            if self._speaker.state() == "idle":
+                self._line = self._idle_line()
+                self._draw()
+        self.after(SETTINGS_WATCH_MS, self._watch_settings)
 
     def _set_status(self, msg: str, color: str = MUTED):
         def _apply():
-            self.status_var.set(msg)
-            self.status_label.configure(fg=color)
+            self._line = msg
+            self._line_color = color
+            if self._speaker.state() == "idle" and color in (OK, MUTED):
+                self._fraction = 0.0
+            self._draw()
         self.after(0, _apply)
 
     def _on_configure(self, _event=None):
         self.after(100, self._update_presence)
 
     def _position_window(self):
+        """Bottom-centre, stacked above the Voice Control bubble when it's up."""
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        x = sw - WIN_W - 24
+        x = max(0, (sw - WIN_W) // 2)
         y = sh - WIN_H - 80
 
         presence = feature_bus.load_presence()
         vc = presence.get("voice_control")
         if vc and feature_bus.is_feature_running("voice_control"):
             win = vc.get("window") or {}
-            vx = win.get("x", sw - VC_W - 24)
             vy = win.get("y", sh - VC_H - 80)
             y = vy - WIN_H - MARGIN
-            x = vx
 
-        self.geometry(f"{WIN_W}x{WIN_H}+{x}+{y}")
+        self.geometry(f"{WIN_W}x{WIN_H}+{x}+{max(0, y)}")
         self.lift()
 
     def _update_presence(self):
@@ -445,20 +581,6 @@ class PageReaderApp(tk.Tk):
             os.getpid(),
             {"x": self.winfo_x(), "y": self.winfo_y(), "w": WIN_W, "h": WIN_H},
         )
-
-    def _on_toggle_change(self):
-        self.settings["voice_guided"] = self._voice_var.get()
-        self.settings["hover_to_read"] = self._hover_var.get()
-        self.settings["use_groq_summary"] = self._groq_var.get()
-        self.settings["reading_level"] = self._level_var.get()
-        save_settings(self.settings)
-        self._update_hover_listener()
-
-    def _save_hotkeys(self):
-        self.settings["hotkeys"]["read_screen"] = self._read_hk_var.get()
-        self.settings["hotkeys"]["stop"] = self._stop_hk_var.get()
-        save_settings(self.settings)
-        self._register_hotkeys()
 
     def _register_hotkeys(self):
         if self._hotkey_listener:
@@ -477,49 +599,6 @@ class PageReaderApp(tk.Tk):
             self._hotkey_listener = keyboard.GlobalHotKeys(bindings)
             self._hotkey_listener.start()
             log(f"hotkeys: read={read_spec!r} stop={stop_spec!r}")
-
-    def _start_hotkey_capture(self, target: str):
-        if self._capture_listener:
-            return
-        self._capture_target = target
-        self._set_status("Press key combo…", ACCENT)
-
-        def on_press(key):
-            if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
-                       keyboard.Key.alt_l, keyboard.Key.alt_r,
-                       keyboard.Key.shift_l, keyboard.Key.shift_r,
-                       keyboard.Key.cmd, keyboard.Key.cmd_r):
-                self._modifiers.add(key)
-                return
-            combo = format_hotkey_from_event(key, self._modifiers)
-            if not combo:
-                return
-            self._finish_hotkey_capture(combo)
-
-        def on_release(key):
-            if key in self._modifiers:
-                self._modifiers.discard(key)
-
-        self._capture_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self._capture_listener.start()
-
-    def _finish_hotkey_capture(self, combo: str):
-        if self._capture_listener:
-            self._capture_listener.stop()
-            self._capture_listener = None
-        other_key = "stop" if self._capture_target == "read_screen" else "read_screen"
-        other_combo = self.settings["hotkeys"][other_key]
-        if combo.lower() == other_combo.lower():
-            self._set_status("Hotkey already used by other action", WARN)
-            self._capture_target = None
-            return
-        if self._capture_target == "read_screen":
-            self._read_hk_var.set(combo)
-        else:
-            self._stop_hk_var.set(combo)
-        self._save_hotkeys()
-        self._set_status(f"Hotkey set: {combo}", OK)
-        self._capture_target = None
 
     def _ocr_log(self, stage: str, msg: str, _level: str = "INFO"):
         log(f"{stage} {msg}")
@@ -592,10 +671,6 @@ class PageReaderApp(tk.Tk):
             text = entry.get("text", "")
             if text:
                 self.cmd_read_section(text)
-        elif cmd == "ask_question":
-            text = entry.get("text", "")
-            if text:
-                self.cmd_ask_question(text)
 
     def _remember_region(self, elements: list[dict]):
         if not elements:
@@ -632,8 +707,7 @@ class PageReaderApp(tk.Tk):
         self._set_status("Analyzing Chrome with AI…", ACCENT)
         img = screen_ocr.capture_chrome_screenshot()
         client = self._groq_client()
-        level_instruction = READING_LEVELS.get(self.settings.get("reading_level", "Normal"), "")
-        script = groq_vision.summarize_page_image(client, img, level_instruction=level_instruction)
+        script = groq_vision.summarize_page_image(client, img)
         lines = groq_vision.script_to_lines(script)
         if not lines:
             self._set_status("Nothing important found in Chrome", WARN)
@@ -759,32 +833,6 @@ class PageReaderApp(tk.Tk):
             log(f"read_section failed: {e}")
             self._set_status(f"Error: {e}", REC)
 
-    def cmd_ask_question(self, query: str):
-        if not self.settings.get("voice_guided", True):
-            self._set_status("Voice-guided read is disabled", WARN)
-            return
-        self._set_status(f'Thinking about "{query}"…', ACCENT)
-        threading.Thread(target=self._do_ask_question, args=(query,), daemon=True).start()
-
-    def _do_ask_question(self, query: str):
-        try:
-            key = os.getenv("GROQ_API_KEY")
-            if not key:
-                self._set_status("GROQ_API_KEY required to answer questions", WARN)
-                return
-            img = screen_ocr.capture_chrome_screenshot()
-            client = self._groq_client()
-            answer = groq_vision.answer_page_question(client, img, query)
-            if not answer:
-                self._set_status("No answer found", WARN)
-                return
-            self._set_status("Answering…", ACCENT)
-            self._speaker.speak_lines([answer])
-            self._set_status("Done", OK)
-        except Exception as e:
-            log(f"ask_question failed: {e}")
-            self._set_status(f"Error: {e}", REC)
-
     def _ask_groq_section(self, query: str, elements: list[dict]) -> list[int]:
         lines = "\n".join(f'  [{i}] "{e["text"]}"' for i, e in enumerate(elements))
         user_msg = f'Read request: "{query}"\n\nVisible lines:\n{lines}'
@@ -814,8 +862,6 @@ class PageReaderApp(tk.Tk):
             self._hotkey_listener.stop()
         if self._hover_listener:
             self._hover_listener.stop()
-        if self._capture_listener:
-            self._capture_listener.stop()
         feature_bus.remove_presence("page_reader")
         self.after(0, self.destroy)
         sys.exit(0)

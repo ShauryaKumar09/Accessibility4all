@@ -47,7 +47,9 @@ ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, feature_bus, platform as plat, screen_ocr  # noqa: E402
+from shared import (console, feature_bus, platform as plat, screen_ocr,  # noqa: E402
+                    settings_store as store, ui_kit as ui)
+from shared.ui_kit import C  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
@@ -58,69 +60,47 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_TIMEOUT = 30
 MAX_INPUT_CHARS = 4000
 
-TONE_SYSTEM_PROMPT = """You are a literal, calibrated interpreter of social and emotional subtext, helping an autistic adult understand what a piece of text might mean beneath its surface words.
+TONE_SYSTEM_PROMPT = """You explain the social and emotional subtext of a message to an autistic adult who finds implied meaning hard to read.
 
-You will receive one snippet of text the user selected or clicked. Analyze ONLY that text. Do not invent context that is not present.
+You will receive one snippet of text the user selected or clicked. Explain ONLY that text. Do not invent context that is not present.
 
-Identify, when genuinely present:
-- overall tone (e.g. neutral, warm, cold, frustrated, anxious, formal, joking)
-- sarcasm or irony (literal words vs. likely intended meaning)
-- urgency or time pressure
-- indirect or implied requests (asking for something without stating it plainly)
-- passive aggression
-- politeness softeners (hedging that masks a firmer point, e.g. "just", "no worries if not")
-- emotional subtext the writer may not have stated outright
+Look for what is genuinely there: the overall tone, sarcasm or irony, urgency, an indirect request, passive aggression, politeness that softens a firmer point, or feeling the writer did not state outright.
 
 CRITICAL RULES:
-- NEVER fabricate subtext. If the text is plainly literal with no notable social cues, say so clearly and return an empty "cues" list.
-- Always hedge. Use words like "likely", "may", "could", "seems". You are reading probabilities, not facts. You cannot know the writer's true intent.
-- Stay grounded in the actual words. Every cue MUST quote the exact span of text it is based on.
-- Be concrete and plain. Explain "what it says" vs "what it likely means" in simple language. Avoid jargon.
-- Do not give advice on how to respond unless the interpretation itself requires it.
+- NEVER fabricate subtext. If the text is plainly literal, say so.
+- Hedge. Say "likely", "seems", "may" — you are reading probabilities, not facts.
+- Stay grounded in the actual words, and quote a few of them when it helps.
+- Write plainly for a person, not a report: no cue-type names, no confidence
+  scores, no headings, no lists.
+- AT MOST TWO SENTENCES in "answer". Short, ordinary words.
 
 Return ONLY valid JSON — no markdown, no commentary, in exactly this shape:
 {
-  "summary": "<one or two plain sentences on the overall tone and whether anything notable is present>",
-  "tone": "<a few words naming the overall tone>",
-  "cues": [
-    {
-      "type": "<sarcasm|urgency|indirect_request|passive_aggression|politeness_softener|emotional_subtext|other>",
-      "quote": "<exact text this cue is based on>",
-      "interpretation": "<what it likely means, hedged>",
-      "confidence": "<low|medium|high>"
-    }
-  ]
+  "tone": "<a few plain words naming the tone, lower case, e.g. polite but impatient>",
+  "answer": "<at most two sentences explaining what they likely mean>"
 }
-
-If nothing notable is found, return a clear "summary" saying the text reads as literal/straightforward, set "tone" accordingly, and set "cues" to [].
 """
 
-# Palette — copied from the other features so this looks like it belongs.
-BG = "#1a1a2e"
-CARD = "#23233f"
-FG = "#e0e0ff"
-MUTED = "#8a8ab0"
-ACCENT = "#748ffc"
-OK = "#69db7c"
-WARN = "#ffd166"
-REC = "#ff6b6b"
+# The answer card is the whole UI now: one tone chip, at most two sentences,
+# and a single Got it button. The old 320x260 window and its 520x600 panel are
+# both gone, and the settings they held moved into the hub.
+FG = C["FG"]
+MUTED = C["FG_MUTED"]
+ACCENT = C["ACCENT"]
+OK = C["ON"]
+WARN = C["WARM_TEXT"]
+REC = C["STOP_BORDER"]
 
-WIN_W, WIN_H = 320, 260
-VC_W, VC_H = 300, 176
-PANEL_W, PANEL_H = 520, 600
+CARD_W = 400
+CARD_PAD_X, CARD_PAD_Y = 22, 20
+CARD_GAP = 12
+BUTTON_H = 52
 MARGIN = 12
+SETTINGS_WATCH_MS = 700
+# Three named sizes replace the old free-form spinbox.
+TEXT_SIZES = store.TONE_TEXT_SIZES
 
-_CONFIDENCE = ("low", "medium", "high")
 _MODIFIER_TOKENS = ("ctrl", "alt", "shift", "cmd")
-_CUE_LABELS = {
-    "sarcasm": "Sarcasm / irony",
-    "urgency": "Urgency / pressure",
-    "indirect_request": "Indirect request",
-    "passive_aggression": "Passive aggression",
-    "politeness_softener": "Politeness softener",
-    "emotional_subtext": "Emotional subtext",
-    "other": "Social cue",
-}
 
 
 def log(msg: str):
@@ -136,29 +116,16 @@ class ParseError(Exception):
 
 
 def default_settings() -> dict:
-    return {
-        "click_to_analyze": False,
-        # Ctrl+Shift+Y avoids Chrome's Ctrl/Cmd+Shift+T (reopen closed tab).
-        "hotkeys": {"analyze_selection": "ctrl+shift+y"},
-        "panel_font_size": 12,
-        "show_raw_on_parse_error": True,
-    }
+    # Ctrl+Shift+Y avoids Chrome's Ctrl/Cmd+Shift+T (reopen closed tab).
+    return dict(store.DEFAULTS["tone_reader"])
 
 
 def load_settings() -> dict:
-    s = default_settings()
-    if SETTINGS_FILE.exists():
-        try:
-            loaded = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            s.update(loaded)
-            s["hotkeys"] = {**default_settings()["hotkeys"], **loaded.get("hotkeys", {})}
-        except Exception as e:
-            log(f"bad settings.json: {e} — using defaults")
-    return s
+    return store.load("tone_reader")
 
 
 def save_settings(settings: dict):
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    store.save("tone_reader", settings)
 
 
 def _norm_key(key) -> str | None:
@@ -195,26 +162,6 @@ def parse_combo(spec: str) -> frozenset[str]:
     return frozenset(toks)
 
 
-def combo_to_string(held: set[str], trigger: str) -> str:
-    """Build a canonical 'ctrl+shift+y' style label from held modifiers + a key."""
-    parts = []
-    if "ctrl" in held:
-        parts.append("ctrl")
-    if "alt" in held:
-        parts.append("alt")
-    if "shift" in held:
-        parts.append("shift")
-    if "cmd" in held:
-        parts.append("command")
-    if len(trigger) == 1:
-        parts.append(trigger.lower())
-    elif trigger.startswith("f") and trigger[1:].isdigit():
-        parts.append(trigger.upper())
-    else:
-        parts.append(trigger)
-    return "+".join(parts)
-
-
 class ToneReaderApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -226,25 +173,23 @@ class ToneReaderApp(tk.Tk):
         self._combo_target: frozenset[str] = parse_combo(
             self.settings["hotkeys"]["analyze_selection"])
         self._combo_armed = False          # debounce: fire once per full chord press
-        self._capturing = False            # True while the "Set" button waits for keys
 
         self._kbd_listener = None          # one keyboard tap: hotkey + shift + capture
         self._mouse_listener = None        # one mouse tap: Shift+Click (when enabled)
 
         self._groq: Groq | None = None
-        self._panel: tk.Toplevel | None = None
-        self._panel_body: tk.Text | None = None
         self._last_analysis: dict | None = None
         self._busy = False
+        self._visible = False
+        self._bounds: tuple[int, int, int, int] | None = None
+        self._watcher = store.Watcher("tone_reader")
 
         self._build_ui()
         save_settings(self.settings)
-        self._position_window()
         self._update_presence()
         self._start_keyboard_listener()
-        self._update_click_listener()
-
-        self.bind("<Configure>", self._on_configure)
+        self._ensure_mouse_listener()
+        self.after(SETTINGS_WATCH_MS, self._watch_settings)
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
 
@@ -259,117 +204,127 @@ class ToneReaderApp(tk.Tk):
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
+        """The whole UI is one card that appears next to what you highlighted.
+
+        Tone chip, at most two sentences, one big Got it. The Shift+Click
+        option, the hotkey row and the text-size control all moved into the
+        hub's settings sheet.
+        """
         self.title("Tone & Social Cues")
         self.resizable(False, False)
-        self.configure(bg=BG)
-        self.attributes("-topmost", True)
+        self.fonts = ui.FontSet(1.0)
+        self._card_h = 200
+        self._visible = False
+        self._transparent = ui.make_bubble(self, CARD_W, self._card_h)
+        self.canvas = ui.bubble_canvas(self, CARD_W, self._card_h,
+                                       self._transparent)
+        self.canvas.pack(fill="both", expand=True)
 
-        tk.Label(self, text="Tone & Social Cues",
-                 font=tkfont.Font(family="Helvetica", size=11, weight="bold"),
-                 fg=FG, bg=BG).pack(anchor="w", padx=14, pady=(10, 4))
+        self._dismiss = ui.TextButton(
+            self.canvas, self.fonts, "Got it", self.hide_card, role="body_sm",
+            height=BUTTON_H, width=CARD_W - CARD_PAD_X * 2, radius=12)
+        self.canvas.create_window(CARD_PAD_X, 0, window=self._dismiss,
+                                  anchor="nw", tags="dismiss")
 
-        toggles = tk.Frame(self, bg=BG)
-        toggles.pack(fill="x", padx=14)
+        self.bind("<Escape>", lambda e: self.hide_card())
+        self.withdraw()
 
-        self._click_var = tk.BooleanVar(value=self.settings.get("click_to_analyze", False))
-        tk.Checkbutton(toggles, text="Shift+Click to analyze in Chrome",
-                       variable=self._click_var, command=self._on_toggle_change,
-                       font=tkfont.Font(family="Helvetica", size=9),
-                       fg=FG, bg=BG, selectcolor=CARD, activebackground=BG,
-                       activeforeground=FG).pack(anchor="w")
+    def _answer_font(self):
+        size = TEXT_SIZES.get(self.settings.get("text_size", "medium"), 22)
+        return tkfont.Font(family="Helvetica", size=size)
 
-        hk_frame = tk.Frame(self, bg=BG)
-        hk_frame.pack(fill="x", padx=14, pady=(8, 0))
-        self._analyze_hk_var = tk.StringVar(
-            value=self.settings["hotkeys"]["analyze_selection"])
-        self._add_hotkey_row(hk_frame, "Analyze:", self._analyze_hk_var)
+    def show_card(self, tone: str, answer: str, tone_color: bool = True):
+        """Draw the card and put it next to the pointer, on screen."""
+        font = self._answer_font()
+        line_h = int(font.metrics("linespace") * 1.45)
+        inner = CARD_W - CARD_PAD_X * 2
 
-        font_frame = tk.Frame(self, bg=BG)
-        font_frame.pack(fill="x", padx=14, pady=(8, 0))
-        tk.Label(font_frame, text="Panel text size:", width=14, anchor="w",
-                 font=tkfont.Font(family="Helvetica", size=9),
-                 fg=MUTED, bg=BG).pack(side="left")
-        self._font_var = tk.IntVar(value=int(self.settings.get("panel_font_size", 12)))
-        tk.Spinbox(font_frame, from_=9, to=22, width=4, textvariable=self._font_var,
-                   command=self._on_font_change,
-                   font=tkfont.Font(family="Helvetica", size=9),
-                   bg=CARD, fg=FG, buttonbackground=CARD,
-                   relief="flat", justify="center").pack(side="left")
+        chip_font = self.fonts["ui_b"]
+        chip_h = chip_font.metrics("linespace") + 12 if tone else 0
+        lines = ui.wrap_lines(font, answer, inner)
+        height = (CARD_PAD_Y * 2 + (chip_h + CARD_GAP if tone else 0)
+                  + len(lines) * line_h + CARD_GAP + BUTTON_H)
 
-        self.status_var = tk.StringVar(value="Idle")
-        self.status_label = tk.Label(self, textvariable=self.status_var,
-                 font=tkfont.Font(family="Helvetica", size=13, weight="bold"),
-                 fg=MUTED, bg=BG, wraplength=WIN_W - 28, justify="left",
-                 anchor="w")
-        self.status_label.pack(fill="x", padx=14, pady=(10, 6))
+        self._card_h = height
+        self.canvas.configure(width=CARD_W, height=height)
+        self.canvas.delete("card")
+        ui.rounded_rect(self.canvas, 1, 1, CARD_W - 1, height - 1, 16,
+                        fill=C["BUBBLE"], outline=C["BORDER_CTRL"], width=1,
+                        tags="card")
+        self.canvas.tag_lower("card")
 
-        tk.Label(self,
-                 text="Highlight text anywhere, then press your hotkey.",
-                 font=tkfont.Font(family="Helvetica", size=8),
-                 fg="#5a5a78", bg=BG, wraplength=WIN_W - 28, justify="left",
-                 anchor="w").pack(anchor="w", padx=14, pady=(0, 8))
+        y = CARD_PAD_Y
+        if tone:
+            chip_w = chip_font.measure(tone) + 28
+            fill = C["WARM_BG"] if tone_color else C["CHIP"]
+            border = C["WARM_BORDER"] if tone_color else C["BORDER_CHIP"]
+            text_col = C["WARM_TEXT"] if tone_color else C["FG_SECOND"]
+            ui.pill(self.canvas, CARD_PAD_X, y, CARD_PAD_X + chip_w, y + chip_h,
+                    fill=fill, outline=border, width=1, tags="card")
+            self.canvas.create_text(CARD_PAD_X + chip_w / 2, y + chip_h / 2,
+                                    text=tone, font=chip_font, fill=text_col,
+                                    tags="card")
+            y += chip_h + CARD_GAP
 
-    def _add_hotkey_row(self, parent, label: str, var: tk.StringVar):
-        row = tk.Frame(parent, bg=BG)
-        row.pack(fill="x", pady=2)
-        tk.Label(row, text=label, width=12, anchor="w",
-                 font=tkfont.Font(family="Helvetica", size=9),
-                 fg=MUTED, bg=BG).pack(side="left")
-        tk.Label(row, textvariable=var,
-                 font=tkfont.Font(family="Helvetica", size=9, weight="bold"),
-                 fg=FG, bg=BG, width=14, anchor="w").pack(side="left")
-        tk.Button(row, text="Set", command=self._start_hotkey_capture,
-                  font=tkfont.Font(family="Helvetica", size=8),
-                  bg=CARD, fg=FG, relief="flat", padx=6, cursor="hand2").pack(side="right")
+        for line in lines:
+            self.canvas.create_text(CARD_PAD_X, y + line_h / 2, anchor="w",
+                                    text=line, font=font, fill=C["FG"],
+                                    tags="card")
+            y += line_h
+        y += CARD_GAP
+        self.canvas.coords("dismiss", CARD_PAD_X, y)
 
-    def _set_status(self, msg: str, color: str = MUTED):
-        def _apply():
-            self.status_var.set(msg)
-            self.status_label.configure(fg=color)
-        self.after(0, _apply)
+        self._place_near_pointer(height)
+        self._visible = True
+        ui.raise_bubble(self)
+        self._ensure_mouse_listener()
 
-    def _on_configure(self, _event=None):
-        self.after(100, self._update_presence)
+    def _place_near_pointer(self, height: int):
+        """Next to the selection — i.e. where the pointer is — clamped on screen."""
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        try:
+            # pyautogui, pynput and Tk all speak logical points on macOS, so the
+            # pointer position needs no Retina scaling here.
+            px, py = pyautogui.position()
+        except Exception:
+            px, py = sw // 2, sh // 2
+        x = min(max(MARGIN, px - CARD_W // 2), sw - CARD_W - MARGIN)
+        y = py + 24
+        if y + height > sh - MARGIN:
+            y = max(MARGIN, py - height - 24)
+        self.geometry(f"{CARD_W}x{height}+{int(x)}+{int(y)}")
+        self._bounds = (x, y, x + CARD_W, y + height)
 
-    def _position_window(self):
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = sw - WIN_W - 24
-        y = sh - WIN_H - 80
-
-        presence = feature_bus.load_presence()
-        vc = presence.get("voice_control")
-        if vc and feature_bus.is_feature_running("voice_control"):
-            win = vc.get("window") or {}
-            vx = win.get("x", sw - VC_W - 24)
-            vy = win.get("y", sh - VC_H - 80)
-            y = vy - WIN_H - MARGIN
-            x = vx
-
-        self.geometry(f"{WIN_W}x{WIN_H}+{x}+{y}")
-        self.lift()
+    def hide_card(self):
+        self._visible = False
+        self.withdraw()
+        self._ensure_mouse_listener()
 
     def _update_presence(self):
         feature_bus.update_presence(
-            "tone_reader",
-            os.getpid(),
-            {"x": self.winfo_x(), "y": self.winfo_y(), "w": WIN_W, "h": WIN_H},
+            "tone_reader", os.getpid(),
+            {"x": self.winfo_x(), "y": self.winfo_y(), "w": CARD_W,
+             "h": self._card_h},
         )
 
-    def _on_toggle_change(self):
-        self.settings["click_to_analyze"] = self._click_var.get()
-        save_settings(self.settings)
-        self._update_click_listener()
+    def _set_status(self, msg: str, color: str = MUTED):
+        """There is no status line any more: progress and errors go to the
+        terminal, and anything the user must see is shown on the card."""
+        log(msg)
 
-    def _on_font_change(self):
-        try:
-            size = int(self._font_var.get())
-        except (tk.TclError, ValueError):
-            return
-        self.settings["panel_font_size"] = size
-        save_settings(self.settings)
-        if self._panel_body is not None and self._last_analysis is not None:
-            self._render_analysis(self._last_analysis)
+    def _watch_settings(self):
+        """Pick up edits the hub made to settings.json while we were running."""
+        if self._watcher.changed():
+            self.settings = load_settings()
+            combo = self.settings["hotkeys"]["analyze_selection"]
+            self._combo_target = parse_combo(combo)
+            self._combo_armed = False
+            log(f"settings changed in the hub — hotkey={combo!r}")
+            self._ensure_mouse_listener()
+            if self._visible and self._last_analysis:
+                self.show_card(self._last_analysis.get("tone", ""),
+                               self._last_analysis.get("answer", ""))
+        self.after(SETTINGS_WATCH_MS, self._watch_settings)
 
     # ------------------------------------------------------ keyboard input
     # ONE keyboard listener does three jobs: detect the analyze hotkey, track
@@ -392,14 +347,6 @@ class ToneReaderApp(tk.Tk):
         self._held.add(tok)
         self._shift_down = "shift" in self._held
 
-        if self._capturing:
-            if tok in _MODIFIER_TOKENS:
-                return  # wait for a non-modifier to complete the chord
-            combo = combo_to_string(self._held, tok)
-            self._capturing = False
-            self.after(0, lambda c=combo: self._finish_hotkey_capture(c))
-            return
-
         if self._combo_target and self._combo_target.issubset(self._held):
             if not self._combo_armed:
                 self._combo_armed = True
@@ -414,44 +361,44 @@ class ToneReaderApp(tk.Tk):
         if not (self._combo_target and self._combo_target.issubset(self._held)):
             self._combo_armed = False
 
-    def _start_hotkey_capture(self):
-        if self._capturing:
-            return
-        self._held.clear()
-        self._capturing = True
-        self._set_status("Press key combo…", ACCENT)
-
-    def _finish_hotkey_capture(self, combo: str):
-        # Runs on the main thread — safe to touch tkinter and settings.
-        self.settings["hotkeys"]["analyze_selection"] = combo
-        self._analyze_hk_var.set(combo)
-        self._combo_target = parse_combo(combo)
-        self._combo_armed = False
-        save_settings(self.settings)
-        self._set_status(f"Hotkey set: {combo}", OK)
-
     # -------------------------------------------------- Trigger B: Shift+Click
 
     def _ocr_log(self, stage: str, msg: str, _level: str = "INFO"):
         log(f"{stage} {msg}")
 
-    def _update_click_listener(self):
-        if self._mouse_listener:
+    def _ensure_mouse_listener(self):
+        """One mouse tap, two jobs: Shift+Click to analyze, click away to dismiss.
+
+        Stacking listeners is what crashed earlier versions on macOS, so this is
+        the only mouse listener the feature ever runs.
+        """
+        wanted = bool(self.settings.get("click_to_analyze")) or self._visible
+        if wanted and self._mouse_listener is None:
+            self._mouse_listener = mouse.Listener(on_click=self._on_click)
+            self._mouse_listener.start()
+            log("mouse listener on (Shift+Click / dismiss)")
+        elif not wanted and self._mouse_listener is not None:
             self._mouse_listener.stop()
             self._mouse_listener = None
-        if not self.settings.get("click_to_analyze"):
-            return
-        self._mouse_listener = mouse.Listener(on_click=self._on_click)
-        self._mouse_listener.start()
-        log("Shift+Click-to-analyze enabled")
 
     def _on_click(self, x, y, button, pressed):
         if not pressed or button != mouse.Button.left:
+            return
+        if self._visible and not self._point_in_card(int(x), int(y)):
+            self.after(0, self.hide_card)
+            return
+        if not self.settings.get("click_to_analyze"):
             return
         if not self._shift_down or self._busy:
             return
         self.after(0, lambda: threading.Thread(
             target=self._do_click_analyze, args=(int(x), int(y)), daemon=True).start())
+
+    def _point_in_card(self, x: int, y: int) -> bool:
+        if not self._bounds:
+            return False
+        x0, y0, x1, y1 = self._bounds
+        return x0 <= x <= x1 and y0 <= y <= y1
 
     def _do_click_analyze(self, x: int, y: int):
         try:
@@ -610,24 +557,10 @@ class ToneReaderApp(tk.Tk):
             raise ParseError(raw)
         if not isinstance(data, dict):
             raise ParseError(raw)
-        cues = []
-        for c in data.get("cues", []) or []:
-            if not isinstance(c, dict):
-                continue
-            conf = str(c.get("confidence", "low")).lower()
-            if conf not in _CONFIDENCE:
-                conf = "low"
-            cues.append({
-                "type": str(c.get("type", "other")),
-                "quote": str(c.get("quote", "")),
-                "interpretation": str(c.get("interpretation", "")),
-                "confidence": conf,
-            })
-        return {
-            "summary": str(data.get("summary", "")).strip(),
-            "tone": str(data.get("tone", "")).strip(),
-            "cues": cues,
-        }
+        answer = str(data.get("answer", "")).strip()
+        if not answer:
+            raise ParseError(raw)
+        return {"tone": str(data.get("tone", "")).strip().lower(), "answer": answer}
 
     # --------------------------------------------------------------- panel
     # NOTE: tkinter exposes no ARIA / accessibility tree. This panel is a
@@ -635,117 +568,19 @@ class ToneReaderApp(tk.Tk):
     # body, Esc to dismiss, high-contrast palette, adjustable font) — it is not
     # a screen-reader-native surface.
 
-    def _ensure_panel(self) -> tk.Text:
-        if self._panel is not None and self._panel.winfo_exists():
-            for child in self._panel.winfo_children():
-                child.destroy()
-        else:
-            self._panel = tk.Toplevel(self)
-            self._panel.title("Tone analysis")
-            self._panel.configure(bg=BG)
-            self._panel.attributes("-topmost", True)
-            self._panel.protocol("WM_DELETE_WINDOW", self._close_panel)
-            self._panel.bind("<Escape>", lambda e: self._close_panel())
-            sw = self.winfo_screenwidth()
-            sh = self.winfo_screenheight()
-            x = max(20, (sw - PANEL_W) // 2)
-            y = max(20, (sh - PANEL_H) // 2)
-            self._panel.geometry(f"{PANEL_W}x{PANEL_H}+{x}+{y}")
-
-        tk.Label(self._panel, text="Tone analysis",
-                 font=tkfont.Font(family="Helvetica", size=13, weight="bold"),
-                 fg=FG, bg=BG).pack(anchor="w", padx=16, pady=(12, 6))
-
-        body_frame = tk.Frame(self._panel, bg=BG)
-        body_frame.pack(fill="both", expand=True, padx=16, pady=(0, 6))
-        size = int(self.settings.get("panel_font_size", 12))
-        body = tk.Text(body_frame, wrap="word", bg=CARD, fg=FG,
-                       insertbackground=FG, relief="flat", padx=12, pady=10,
-                       font=tkfont.Font(family="Helvetica", size=size),
-                       takefocus=True, cursor="arrow")
-        scroll = tk.Scrollbar(body_frame, command=body.yview)
-        body.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        body.pack(side="left", fill="both", expand=True)
-
-        body.tag_configure("h", font=tkfont.Font(family="Helvetica", size=size + 1,
-                                                  weight="bold"), foreground=FG)
-        body.tag_configure("label", font=tkfont.Font(family="Helvetica", size=size,
-                                                      weight="bold"), foreground=ACCENT)
-        body.tag_configure("quote", foreground=MUTED,
-                           font=tkfont.Font(family="Helvetica", size=size, slant="italic"))
-        body.tag_configure("meta", foreground=MUTED,
-                           font=tkfont.Font(family="Helvetica", size=max(8, size - 2)))
-        body.tag_configure("body", foreground=FG)
-
-        tk.Button(self._panel, text="Close (Esc)", command=self._close_panel,
-                  font=tkfont.Font(family="Helvetica", size=11),
-                  bg=ACCENT, fg=BG, relief="flat", padx=12, pady=4,
-                  cursor="hand2", activebackground=ACCENT).pack(pady=(0, 12))
-
-        self._panel_body = body
-        self._panel.lift()
-        body.focus_set()
-        return body
-
     def _open_panel_loading(self):
-        body = self._ensure_panel()
-        body.configure(state="normal")
-        body.delete("1.0", "end")
-        body.insert("end", "Analyzing tone…\n", "h")
-        body.insert("end", "Reading the social subtext of your text.", "meta")
-        body.configure(state="disabled")
+        self.show_card("", "Reading the tone…", tone_color=False)
 
     def _render_analysis(self, data: dict):
-        body = self._ensure_panel()
-        body.configure(state="normal")
-        body.delete("1.0", "end")
-
-        summary = data.get("summary") or "No summary returned."
-        body.insert("end", "Summary\n", "h")
-        body.insert("end", summary + "\n\n", "body")
-
-        tone = data.get("tone")
-        if tone:
-            body.insert("end", "Tone: ", "label")
-            body.insert("end", tone + "\n\n", "body")
-
-        cues = data.get("cues") or []
-        if not cues:
-            body.insert("end",
-                        "Nothing notable — this reads as straightforward.\n", "body")
-        else:
-            body.insert("end", "What stood out\n", "h")
-            for c in cues:
-                label = _CUE_LABELS.get(c.get("type", "other"), "Social cue")
-                body.insert("end", f"\n{label}\n", "label")
-                if c.get("quote"):
-                    body.insert("end", "What it says: ", "meta")
-                    body.insert("end", c["quote"] + "\n", "quote")
-                if c.get("interpretation"):
-                    body.insert("end", "What it likely means: ", "meta")
-                    body.insert("end", c["interpretation"] + "\n", "body")
-                body.insert("end", f"Confidence: {c.get('confidence', 'low')}\n", "meta")
-
-        body.configure(state="disabled")
-        body.focus_set()
+        self.show_card(data.get("tone", ""), data.get("answer", ""))
 
     def _render_error(self, message: str, raw: str | None):
-        body = self._ensure_panel()
-        body.configure(state="normal")
-        body.delete("1.0", "end")
-        body.insert("end", "Couldn't analyze this text\n", "h")
-        body.insert("end", message + "\n", "body")
         if raw:
-            body.insert("end", "\nRaw response:\n", "meta")
-            body.insert("end", raw, "quote")
-        body.configure(state="disabled")
+            log(f"raw response: {raw[:400]}")
+        self.show_card("", message, tone_color=False)
 
     def _close_panel(self):
-        if self._panel is not None and self._panel.winfo_exists():
-            self._panel.destroy()
-        self._panel = None
-        self._panel_body = None
+        self.hide_card()
 
     # ------------------------------------------------------------ shutdown
 

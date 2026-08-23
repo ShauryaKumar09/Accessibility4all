@@ -14,17 +14,12 @@ PRESENCE_FILE = BUS_DIR / "presence.json"
 HUB_STATE_FILE = ROOT / "hub_state.json"
 PAGE_READER_SETTINGS = ROOT / "features" / "page_reader" / "settings.json"
 
-DEFAULT_PAGE_READER_SETTINGS = {
-    "voice_guided": True,
-    "hover_to_read": False,
-    "use_groq_summary": True,
-    "hotkeys": {"read_screen": "F9", "stop": "F10"},
-    "tts_rate": 145,
-    "tts_volume": 1.0,
-    "tts_voice": "en-US-AvaMultilingualNeural",
-    "reading_level": "Normal",
-    "hover_delay_ms": 200,
-}
+# One source of truth for every feature's defaults now lives in
+# shared/settings_store.py (the hub edits those files). Kept here under the old
+# name so existing callers — e.g. voice_control's read-aloud handoff — still work.
+from shared.settings_store import DEFAULTS as _DEFAULTS  # noqa: E402
+
+DEFAULT_PAGE_READER_SETTINGS = dict(_DEFAULTS["page_reader"])
 
 
 def ensure_bus_dir():

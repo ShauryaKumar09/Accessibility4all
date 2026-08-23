@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  @font-face {
+    font-family: 'OpenDyslexic';
+    src: url('https://cdn.jsdelivr.net/npm/@fontsource/opendyslexic@5.0.11/files/opendyslexic-latin-400-normal.woff2') format('woff2');
+    font-weight: 400;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'OpenDyslexic';
+    src: url('https://cdn.jsdelivr.net/npm/@fontsource/opendyslexic@5.0.11/files/opendyslexic-latin-700-normal.woff2') format('woff2');
+    font-weight: 700;
+    font-display: swap;
+  }
+</style>
+<style>
+  body { margin: 0; background: #0a0b0e; }
+  a { color: #8ab4ff; text-decoration: none; }
+  a:hover { color: #b0ccff; }
+  @keyframes fw-bar { 0%,100% { transform: scaleY(0.2) } 50% { transform: scaleY(1) } }
+  @keyframes fw-pulse { 0% { transform: scale(1); opacity: 0.5 } 100% { transform: scale(1.5); opacity: 0 } }
+</style>
+</helmet>
+<div style="min-height: 100vh; padding: 48px 56px 96px; background: #0a0b0e; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #f4f6fa">
+
+  <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 44px">
+    <div style="font-size: 13px; letter-spacing: 1.6px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Redesigned — one shape, one language</div>
+    <div style="font-size: 30px; font-weight: 600; letter-spacing: -0.4px">The four feature windows</div>
+    <div style="font-size: 17px; color: #b6becd; max-width: 760px; text-wrap: pretty">Every control is at least 48px tall, nothing smaller than 17px type, and each window says what it does in plain words. All four are clickable.</div>
+  </div>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 48px; align-items: flex-start">
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Voice Control</div>
+      <div style="width: 460px; box-sizing: border-box; display: flex; flex-direction: column; background: #14161b; border: 1px solid #262a33; border-radius: 16px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.55)">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid #1f232b">
+          <div style="font-size: 22px; font-weight: 600">Voice Control</div>
+          <div style="font-size: 17px; color: {{ vcStateColor }}">{{ vcState }}</div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 32px 24px 24px">
+          <div style="position: relative; width: 132px; height: 132px; display: flex; align-items: center; justify-content: center">
+            <div style="position: absolute; inset: 0; border-radius: 50%; border: 3px solid #6f9bff; animation: fw-pulse 1.6s ease-out infinite; display: {{ vcPulse }}"></div>
+            <div data-act="vc-mic" role="button" tabindex="0" style="width: 132px; height: 132px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; background: {{ vcMicBg }}; border: 3px solid; border-color: {{ vcMicBorder }}" style-hover="filter: brightness(1.15)">
+              <div style="width: 20px; height: 34px; border-radius: 10px; background: {{ vcMicFg }}"></div>
+              <div style="width: 30px; height: 4px; border-radius: 2px; background: {{ vcMicFg }}"></div>
+              <div style="font-size: 15px; font-weight: 500; color: {{ vcMicFg }}; padding-top: 4px">{{ vcMicLabel }}</div>
+            </div>
+          </div>
+
+          <div style="height: 40px; display: flex; align-items: center">{{ vcWave }}</div>
+
+          <div style="font-size: 18px; color: #b6becd; text-align: center; text-wrap: pretty">Hold the <span style="display: inline-block; min-width: 28px; padding: 3px 9px; border-radius: 7px; background: #21252e; border: 1px solid #343a46; color: #f4f6fa; font-weight: 600">`</span> key, or press the circle, and say what you want.</div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 10px; padding: 0 24px 20px">
+          <sc-for list="{{ vcLog }}" as="l" hint-placeholder-count="3">
+            <div style="display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; border-radius: 14px; background: #191c23; border: 1px solid #262a33">
+              <div style="font-size: 14px; color: #7d859a">{{ l.label }}</div>
+              <div style="font-size: 19px; color: {{ l.color }}; text-wrap: pretty">{{ l.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div data-act="vc-always" role="switch" tabindex="0" style="display: flex; align-items: center; gap: 20px; margin: 0 24px 24px; padding: 18px 22px; border-radius: 14px; background: #191c23; border: 2px solid; border-color: {{ vcAlwaysBorder }}; cursor: pointer" style-hover="background: #1d212a">
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+            <div style="font-size: 19px; font-weight: 600">Always listening</div>
+            <div style="font-size: 16px; color: #b6becd">No key to hold — just speak.</div>
+          </div>
+          <div style="font-size: 17px; font-weight: 600; color: {{ vcAlwaysColor }}">{{ vcAlwaysLabel }}</div>
+          <div style="width: 72px; height: 40px; flex: none; border-radius: 20px; padding: 4px; box-sizing: border-box; display: flex; background: {{ vcAlwaysTrack }}">
+            <div style="width: 32px; height: 32px; border-radius: 50%; background: #ffffff; margin-left: {{ vcAlwaysKnob }}"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width: 460px; box-sizing: border-box; display: flex; align-items: center; gap: 16px; padding: 12px 22px 12px 14px; border-radius: 999px; background: #191c23; border: 1px solid #2e333e; box-shadow: 0 16px 40px rgba(0,0,0,0.5)">
+        <div data-act="vc-mic" style="width: 56px; height: 56px; flex: none; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; cursor: pointer; background: {{ vcMicBg }}; border: 2px solid; border-color: {{ vcMicBorder }}">
+          <div style="width: 10px; height: 17px; border-radius: 5px; background: {{ vcMicFg }}"></div>
+          <div style="width: 16px; height: 3px; border-radius: 2px; background: {{ vcMicFg }}"></div>
+        </div>
+        <div style="display: flex; align-items: center; height: 30px">{{ vcBarWave }}</div>
+        <div style="flex: 1; font-size: 18px; color: #dfe4ec">{{ vcBarText }}</div>
+      </div>
+      <div style="font-size: 14px; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Compact bar — floats over any app</div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Page Reader</div>
+      <div style="width: 460px; box-sizing: border-box; display: flex; flex-direction: column; background: #14161b; border: 1px solid #262a33; border-radius: 16px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.55)">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid #1f232b">
+          <div style="font-size: 22px; font-weight: 600">Page Reader</div>
+          <div style="font-size: 17px; color: {{ prStateColor }}">{{ prState }}</div>
+        </div>
+
+        <div style="padding: 24px 24px 20px; display: flex; flex-direction: column; gap: 14px">
+          <div data-act="pr-read" role="button" tabindex="0" style="height: 84px; border-radius: 16px; display: flex; align-items: center; justify-content: center; gap: 14px; cursor: pointer; background: {{ prBtnBg }}; border: 2px solid; border-color: {{ prBtnBorder }}" style-hover="filter: brightness(1.12)">
+            <div style="width: 0; height: 0; border-left: 22px solid {{ prBtnFg }}; border-top: 14px solid transparent; border-bottom: 14px solid transparent; display: {{ prPlayDisplay }}"></div>
+            <div style="display: {{ prPauseDisplay }}; align-items: center; gap: 6px">
+              <div style="width: 8px; height: 26px; border-radius: 2px; background: {{ prBtnFg }}"></div>
+              <div style="width: 8px; height: 26px; border-radius: 2px; background: {{ prBtnFg }}"></div>
+            </div>
+            <div style="font-size: 24px; font-weight: 600; color: {{ prBtnFg }}">{{ prBtnLabel }}</div>
+          </div>
+
+          <div style="padding: 18px 20px; border-radius: 14px; background: #191c23; border: 1px solid #262a33; display: flex; flex-direction: column; gap: 8px">
+            <div style="font-size: 14px; color: #7d859a">Now reading</div>
+            <div style="font-size: 19px; line-height: 1.4; color: {{ prNowColor }}; text-wrap: pretty">{{ prNow }}</div>
+          </div>
+        </div>
+
+        <div style="padding: 0 24px 20px; display: flex; flex-direction: column; gap: 12px">
+          <div onClick="{{ onClick }}" style="display: flex; flex-direction: column; gap: 12px">
+            <sc-for list="{{ prOptions }}" as="o" hint-placeholder-count="3">
+              <div data-act="pr-opt" data-id="{{ o.id }}" role="switch" tabindex="0" style="display: flex; align-items: center; gap: 18px; padding: 18px 22px; border-radius: 14px; background: #191c23; border: 2px solid; border-color: {{ o.border }}; cursor: pointer" style-hover="background: #1d212a">
+                <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+                  <div style="font-size: 19px; font-weight: 600">{{ o.name }}</div>
+                  <div style="font-size: 16px; color: #b6becd; text-wrap: pretty">{{ o.hint }}</div>
+                </div>
+                <div style="font-size: 17px; font-weight: 600; color: {{ o.color }}">{{ o.label }}</div>
+                <div style="width: 72px; height: 40px; flex: none; border-radius: 20px; padding: 4px; box-sizing: border-box; display: flex; background: {{ o.track }}">
+                  <div style="width: 32px; height: 32px; border-radius: 50%; background: #ffffff; margin-left: {{ o.knob }}"></div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 16px; padding: 16px 22px; border-radius: 14px; background: #191c23; border: 1px solid #262a33">
+            <div style="flex: 1; font-size: 18px">Keyboard shortcut</div>
+            <div style="font-size: 20px; font-weight: 600; padding: 8px 16px; border-radius: 10px; background: #21252e; border: 1px solid #343a46">F9</div>
+            <div style="height: 52px; padding: 0 20px; display: flex; align-items: center; border-radius: 12px; border: 2px solid #2e333e; font-size: 17px; cursor: pointer" style-hover="border-color: #6f9bff">Change</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Tone &amp; Social Cues</div>
+      <div style="width: 520px; box-sizing: border-box; display: flex; flex-direction: column; background: #14161b; border: 1px solid #262a33; border-radius: 16px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.55)">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid #1f232b">
+          <div style="font-size: 22px; font-weight: 600">Tone &amp; Social Cues</div>
+          <div style="font-size: 17px; color: #7d859a">Ready</div>
+        </div>
+
+        <div style="padding: 24px 24px 20px; display: flex; flex-direction: column; gap: 14px">
+          <div data-act="tr-explain" role="button" tabindex="0" style="height: 84px; border-radius: 16px; display: flex; align-items: center; justify-content: center; cursor: pointer; background: #2b3a63; border: 2px solid #6f9bff" style-hover="filter: brightness(1.12)">
+            <div style="font-size: 24px; font-weight: 600; color: #eaf0ff">Explain what I highlighted</div>
+          </div>
+          <div style="font-size: 17px; color: #b6becd; text-align: center">Or press <span style="display: inline-block; padding: 3px 9px; border-radius: 7px; background: #21252e; border: 1px solid #343a46; color: #f4f6fa; font-weight: 600">⇧⌘'</span> anywhere</div>
+        </div>
+
+        <div style="margin: 0 24px 20px; padding: 22px; border-radius: 14px; background: #191c23; border: 1px solid #262a33; display: flex; flex-direction: column; gap: 14px">
+          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+            <div style="font-size: 16px; color: #7d859a">Tone</div>
+            <div style="font-size: 18px; font-weight: 600; padding: 8px 16px; border-radius: 999px; background: #3a2f1c; border: 1px solid #7a6134; color: #ffd68a">{{ trTone }}</div>
+          </div>
+          <div style="font-size: 20px; line-height: 1.5; text-wrap: pretty">{{ trSummary }}</div>
+          <div style="height: 1px; background: #262a33"></div>
+          <sc-for list="{{ trCues }}" as="c" hint-placeholder-count="2">
+            <div style="display: flex; flex-direction: column; gap: 6px; padding: 16px 18px; border-radius: 12px; background: #1e222a">
+              <div style="font-size: 18px; font-weight: 600; color: #8ab4ff">{{ c.kind }}</div>
+              <div style="font-size: 18px; font-style: italic; color: #b6becd; text-wrap: pretty">“{{ c.quote }}”</div>
+              <div style="font-size: 18px; line-height: 1.45; text-wrap: pretty">{{ c.meaning }}</div>
+              <div style="font-size: 15px; color: #7d859a">{{ c.confidence }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="padding: 0 24px 24px; display: flex; flex-direction: column; gap: 12px">
+          <div style="font-size: 18px; color: #b6becd">Text size in this panel</div>
+          <div onClick="{{ onClick }}" style="display: flex; gap: 10px">
+            <sc-for list="{{ trSizes }}" as="s" hint-placeholder-count="3">
+              <div data-act="tr-size" data-id="{{ s.id }}" role="button" tabindex="0" style="flex: 1; height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 12px; cursor: pointer; background: {{ s.bg }}; border: 2px solid; border-color: {{ s.border }}; font-size: {{ s.fontSize }}; font-weight: 600; color: {{ s.color }}" style-hover="filter: brightness(1.15)">{{ s.label }}</div>
+            </sc-for>
+          </div>
+
+          <div data-act="tr-click" role="switch" tabindex="0" style="display: flex; align-items: center; gap: 18px; padding: 18px 22px; border-radius: 14px; background: #191c23; border: 2px solid; border-color: {{ trClickBorder }}; cursor: pointer" style-hover="background: #1d212a">
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+              <div style="font-size: 19px; font-weight: 600">Shift + click a paragraph</div>
+              <div style="font-size: 16px; color: #b6becd">Explain it without highlighting first.</div>
+            </div>
+            <div style="font-size: 17px; font-weight: 600; color: {{ trClickColor }}">{{ trClickLabel }}</div>
+            <div style="width: 72px; height: 40px; flex: none; border-radius: 20px; padding: 4px; box-sizing: border-box; display: flex; background: {{ trClickTrack }}">
+              <div style="width: 32px; height: 32px; border-radius: 50%; background: #ffffff; margin-left: {{ trClickKnob }}"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Dyslexia Font</div>
+      <div style="width: 520px; box-sizing: border-box; display: flex; flex-direction: column; background: #14161b; border: 1px solid #262a33; border-radius: 16px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.55)">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid #1f232b">
+          <div style="font-size: 22px; font-weight: 600">Dyslexia Font</div>
+          <div style="font-size: 17px; color: #7d859a">Websites</div>
+        </div>
+
+        <div style="padding: 24px 24px 0">
+          <div data-act="df-web" role="switch" tabindex="0" style="display: flex; align-items: center; gap: 18px; padding: 18px 22px; border-radius: 14px; background: #191c23; border: 2px solid; border-color: {{ dfWebBorder }}; cursor: pointer" style-hover="background: #1d212a">
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+              <div style="font-size: 19px; font-weight: 600">Use this font on websites</div>
+              <div style="font-size: 16px; color: #b6becd">Applies as you browse in Chrome.</div>
+            </div>
+            <div style="font-size: 17px; font-weight: 600; color: {{ dfWebColor }}">{{ dfWebLabel }}</div>
+            <div style="width: 72px; height: 40px; flex: none; border-radius: 20px; padding: 4px; box-sizing: border-box; display: flex; background: {{ dfWebTrack }}">
+              <div style="width: 32px; height: 32px; border-radius: 50%; background: #ffffff; margin-left: {{ dfWebKnob }}"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="padding: 22px 24px 0; display: flex; flex-direction: column; gap: 12px">
+          <div style="font-size: 18px; color: #b6becd">Pick a font</div>
+          <div onClick="{{ onClick }}" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
+            <sc-for list="{{ dfFonts }}" as="f" hint-placeholder-count="4">
+              <div data-act="df-font" data-id="{{ f.id }}" role="button" tabindex="0" style="min-height: 84px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 16px 18px; border-radius: 14px; cursor: pointer; background: {{ f.bg }}; border: 2px solid; border-color: {{ f.border }}" style-hover="filter: brightness(1.15)">
+                <div style="font-size: 22px; font-weight: 600; font-family: {{ f.family }}">{{ f.name }}</div>
+                <div style="font-size: 16px; color: #b6becd">{{ f.note }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="padding: 22px 24px 0; display: flex; flex-direction: column; gap: 12px">
+          <sc-for list="{{ dfSteppers }}" as="s" hint-placeholder-count="2">
+            <div style="display: flex; align-items: center; gap: 16px; padding: 14px 18px; border-radius: 14px; background: #191c23; border: 1px solid #262a33">
+              <div style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+                <div style="font-size: 19px; font-weight: 600">{{ s.name }}</div>
+                <div style="font-size: 16px; color: #b6becd">{{ s.value }}</div>
+              </div>
+              <div data-act="df-step" data-id="{{ s.downId }}" role="button" tabindex="0" style="width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 12px; border: 2px solid #2e333e; background: #1e222a; cursor: pointer" style-hover="border-color: #6f9bff">
+                <div style="width: 22px; height: 4px; border-radius: 2px; background: #f4f6fa"></div>
+              </div>
+              <div data-act="df-step" data-id="{{ s.upId }}" role="button" tabindex="0" style="position: relative; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 12px; border: 2px solid #2e333e; background: #1e222a; cursor: pointer" style-hover="border-color: #6f9bff">
+                <div style="position: absolute; width: 22px; height: 4px; border-radius: 2px; background: #f4f6fa"></div>
+                <div style="position: absolute; width: 4px; height: 22px; border-radius: 2px; background: #f4f6fa"></div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="padding: 22px 24px 24px; display: flex; flex-direction: column; gap: 10px">
+          <div style="font-size: 16px; color: #7d859a">Preview</div>
+          <div style="padding: 20px; border-radius: 14px; background: #191c23; border: 1px solid #262a33; font-size: 20px; color: #f4f6fa; font-family: {{ dfPreviewFamily }}; letter-spacing: {{ dfPreviewSpacing }}; line-height: {{ dfPreviewLine }}; text-wrap: pretty">The quick brown fox jumps over the lazy dog. Reading should feel calm, not cramped.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{}">
+const FONTS = [
+  { id: "opendyslexic", name: "OpenDyslexic", note: "Weighted bottoms", family: "'OpenDyslexic', Verdana, sans-serif" },
+  { id: "atkinson", name: "Atkinson Hyperlegible", note: "Clearer letter shapes", family: "'Atkinson Hyperlegible', Verdana, sans-serif" },
+  { id: "comic", name: "Comic Sans MS", note: "Informal, wide spacing", family: "'Comic Sans MS', cursive" },
+  { id: "arial", name: "Arial", note: "Plain and familiar", family: "Arial, Helvetica, sans-serif" },
+];
+
+const SIZES = [
+  { id: "small", label: "Small", fontSize: "18px" },
+  { id: "medium", label: "Medium", fontSize: "22px" },
+  { id: "large", label: "Large", fontSize: "28px" },
+];
+
+class Component extends DCLogic {
+  state = {
+    vc: "idle", vcAlways: false,
+    prReading: false, prOpts: { voice_guided: true, hover: false, summary: true },
+    trSize: "medium", trClick: true,
+    dfWeb: true, dfFont: "opendyslexic", dfSpacing: 0.03, dfLine: 1.55,
+  };
+
+  bars(count, height, width) {
+    const on = this.state.vc === "listening";
+    return React.createElement("div", { style: { display: "flex", alignItems: "center", gap: width > 4 ? 6 : 5, height } },
+      Array.from({ length: count }, (_, i) => React.createElement("div", {
+        key: i,
+        style: {
+          width, height, borderRadius: width / 2, background: on ? "#8ab4ff" : "#3a4051",
+          transformOrigin: "center", transform: on ? undefined : "scaleY(0.16)", opacity: on ? 1 : 0.5,
+          animation: on ? `fw-bar ${0.62 + (i % 5) * 0.11}s ease-in-out ${i * 0.055}s infinite` : "none",
+        },
+      })));
+    }
+
+  sw(on) {
+    return { border: on ? "#4ad991" : "#262a33", track: on ? "#4ad991" : "#3a4051",
+      knob: on ? "32px" : "0px", label: on ? "On" : "Off", color: on ? "#4ad991" : "#7d859a" };
+  }
+
+  renderVals() {
+    const s = this.state;
+    const listening = s.vc === "listening";
+    const va = this.sw(s.vcAlways), tc = this.sw(s.trClick), dw = this.sw(s.dfWeb);
+
+    return {
+      onClick: () => {},
+      vcState: listening ? "Listening" : s.vc === "done" ? "Done" : "Ready",
+      vcStateColor: listening ? "#8ab4ff" : s.vc === "done" ? "#4ad991" : "#7d859a",
+      vcMicBg: listening ? "#2b3a63" : "#1c202a",
+      vcMicBorder: listening ? "#6f9bff" : "#3a4051",
+      vcMicFg: listening ? "#eaf0ff" : "#dfe4ec",
+      vcMicLabel: listening ? "Listening" : "Talk",
+      vcPulse: listening ? "block" : "none",
+      vcWave: this.bars(13, 40, 8),
+      vcBarWave: this.bars(9, 30, 5),
+      vcBarText: listening ? "Listening…" : s.vc === "done" ? "Opened the first link" : "Hold ` to talk",
+      vcLog: listening
+        ? [{ label: "Listening", text: "…", color: "#8ab4ff" }]
+        : [
+            { label: "You said", text: "scroll down and open the first link", color: "#f4f6fa" },
+            { label: "What happened", text: "✓ Opened the first link in Chrome", color: "#4ad991" },
+          ],
+      vcAlwaysBorder: va.border, vcAlwaysTrack: va.track, vcAlwaysKnob: va.knob,
+      vcAlwaysLabel: va.label, vcAlwaysColor: va.color,
+
+      prState: s.prReading ? "Reading" : "Ready",
+      prStateColor: s.prReading ? "#4ad991" : "#7d859a",
+      prBtnLabel: s.prReading ? "Stop reading" : "Read this screen",
+      prBtnBg: s.prReading ? "#3a2226" : "#2b3a63",
+      prBtnBorder: s.prReading ? "#ff8f8f" : "#6f9bff",
+      prBtnFg: s.prReading ? "#ffdede" : "#eaf0ff",
+      prPlayDisplay: s.prReading ? "none" : "block",
+      prPauseDisplay: s.prReading ? "flex" : "none",
+      prNow: s.prReading
+        ? "“Grants are open until the end of the month for anyone who applied last year…”"
+        : "Nothing yet. Press the button or your shortcut key.",
+      prNowColor: s.prReading ? "#f4f6fa" : "#7d859a",
+      prOptions: [
+        { id: "voice_guided", name: "Let me pick sections by voice", hint: "Say “read the headlines”.", ...this.sw(s.prOpts.voice_guided) },
+        { id: "hover", name: "Read when I rest the pointer", hint: "Hold still over any text.", ...this.sw(s.prOpts.hover) },
+        { id: "summary", name: "Skip the clutter", hint: "Read the main content, not menus.", ...this.sw(s.prOpts.summary) },
+      ],
+
+      trTone: "polite but impatient",
+      trSummary: "They are being friendly, but they want this today — the last line sounds a little frustrated.",
+      trCues: [
+        { kind: "Time pressure", quote: "as soon as you get a chance", meaning: "They likely want it today, even though it sounds optional.", confidence: "Fairly sure" },
+        { kind: "Mild frustration", quote: "just circling back again", meaning: "“Again” suggests they feel their earlier message was missed.", confidence: "Not certain" },
+      ],
+      trSizes: SIZES.map(z => ({ ...z,
+        bg: s.trSize === z.id ? "#2b3a63" : "#191c23",
+        border: s.trSize === z.id ? "#6f9bff" : "#2e333e",
+        color: s.trSize === z.id ? "#eaf0ff" : "#b6becd" })),
+      trClickBorder: tc.border, trClickTrack: tc.track, trClickKnob: tc.knob,
+      trClickLabel: tc.label, trClickColor: tc.color,
+
+      dfWebBorder: dw.border, dfWebTrack: dw.track, dfWebKnob: dw.knob,
+      dfWebLabel: dw.label, dfWebColor: dw.color,
+      dfFonts: FONTS.map(f => ({ ...f,
+        bg: s.dfFont === f.id ? "#2b3a63" : "#191c23",
+        border: s.dfFont === f.id ? "#6f9bff" : "#2e333e" })),
+      dfSteppers: [
+        { name: "Space between letters", value: s.dfSpacing.toFixed(2) + " em", downId: "spacing-", upId: "spacing+" },
+        { name: "Space between lines", value: s.dfLine.toFixed(2) + "×", downId: "line-", upId: "line+" },
+      ],
+      dfPreviewFamily: (FONTS.find(f => f.id === s.dfFont) || FONTS[0]).family,
+      dfPreviewSpacing: s.dfSpacing + "em",
+      dfPreviewLine: String(s.dfLine),
+    };
+  }
+
+  componentDidMount() {
+    this._onClick = (e) => {
+      const el = e.target.closest("[data-act]");
+      if (!el) return;
+      const act = el.getAttribute("data-act");
+      const id = el.getAttribute("data-id");
+      const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, +v.toFixed(2)));
+      if (act === "vc-mic") this.setState(st => ({ vc: st.vc === "listening" ? "done" : "listening" }));
+      else if (act === "vc-always") this.setState(st => ({ vcAlways: !st.vcAlways }));
+      else if (act === "pr-read") this.setState(st => ({ prReading: !st.prReading }));
+      else if (act === "pr-opt") this.setState(st => ({ prOpts: { ...st.prOpts, [id]: !st.prOpts[id] } }));
+      else if (act === "tr-size") this.setState({ trSize: id });
+      else if (act === "tr-click") this.setState(st => ({ trClick: !st.trClick }));
+      else if (act === "tr-explain") this.setState({});
+      else if (act === "df-web") this.setState(st => ({ dfWeb: !st.dfWeb }));
+      else if (act === "df-font") this.setState({ dfFont: id });
+      else if (act === "df-step") this.setState(st => {
+        if (id === "spacing+") return { dfSpacing: clamp(st.dfSpacing + 0.01, 0, 0.12) };
+        if (id === "spacing-") return { dfSpacing: clamp(st.dfSpacing - 0.01, 0, 0.12) };
+        if (id === "line+") return { dfLine: clamp(st.dfLine + 0.05, 1, 2.2) };
+        return { dfLine: clamp(st.dfLine - 0.05, 1, 2.2) };
+      });
+    };
+    document.addEventListener("click", this._onClick);
+  }
+
+  componentWillUnmount() {
+    document.removeEventListener("click", this._onClick);
+  }
+}
+</script>
+</body>
+</html>
