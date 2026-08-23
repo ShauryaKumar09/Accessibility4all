@@ -116,9 +116,6 @@ FEATURE_ICONS = {
     "page_reader": "🔊",
     "tone_reader": "🗣",
     "dyslexia_font": "🔤",
-    "reading_level_summarizer": "📖",
-    "dictate": "⌨",
-    "dyslexia_screening": "📝",
     "colorblind_filter": "🎨",
     "focus_mode": "⏱",
 }
