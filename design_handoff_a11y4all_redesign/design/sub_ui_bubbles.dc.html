@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<style>
+  body { margin: 0; background: #0a0b0e; }
+  a { color: #8ab4ff; text-decoration: none; }
+  a:hover { color: #b0ccff; }
+  @keyframes bb-bar { 0%,100% { transform: scaleY(0.2) } 50% { transform: scaleY(1) } }
+  @keyframes bb-pulse { 0% { transform: scale(1); opacity: 0.5 } 100% { transform: scale(1.6); opacity: 0 } }
+</style>
+</helmet>
+<div style="min-height: 100vh; padding: 48px 56px 96px; background: #0a0b0e; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #f4f6fa; display: flex; flex-direction: column; gap: 64px">
+
+  <div style="display: flex; flex-direction: column; gap: 8px">
+    <div style="font-size: 13px; letter-spacing: 1.6px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Settings live in the hub — the desktop only gets a bubble</div>
+    <div style="font-size: 30px; font-weight: 600; letter-spacing: -0.4px">While you're using it</div>
+    <div style="font-size: 17px; color: #b6becd; max-width: 780px; text-wrap: pretty">Each feature drops to a small bubble that shows live state and at most one big action. No switches, no shortcuts, no instructions — those moved into the hub.</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 28px">
+    <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">1 · The bubbles, over your desktop</div>
+
+    <div style="display: flex; flex-wrap: wrap; gap: 40px; align-items: flex-start">
+
+      <div style="display: flex; flex-direction: column; gap: 14px">
+        <div style="font-size: 17px; color: #b6becd">Voice Control — resting, then listening</div>
+        <div style="width: 560px; height: 260px; box-sizing: border-box; position: relative; border-radius: 16px; background: #1b1d21; border: 1px solid #24262c; overflow: hidden; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 26px">
+          <div style="position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; padding: 26px 30px; opacity: 0.42">
+            <div style="width: 180px; height: 15px; border-radius: 4px; background: #33363d"></div>
+            <div style="width: 100%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+            <div style="width: 88%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+            <div style="width: 94%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+            <div style="width: 60%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+          </div>
+          <div data-act="vc" style="position: relative; display: flex; align-items: center; gap: 14px; height: 60px; padding: {{ vcPad }}; border-radius: 999px; background: rgba(18,20,25,0.92); border: 1px solid {{ vcBorder }}; box-shadow: 0 12px 34px rgba(0,0,0,0.55); cursor: pointer">
+            <div style="position: relative; width: 40px; height: 40px; flex: none; display: flex; align-items: center; justify-content: center">
+              <div style="position: absolute; inset: -4px; border-radius: 50%; border: 2px solid #6f9bff; animation: bb-pulse 1.6s ease-out infinite; display: {{ vcPulse }}"></div>
+              <div style="width: 40px; height: 40px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; background: {{ vcDotBg }}">
+                <div style="width: 8px; height: 14px; border-radius: 4px; background: {{ vcDotFg }}"></div>
+                <div style="width: 14px; height: 3px; border-radius: 2px; background: {{ vcDotFg }}"></div>
+              </div>
+            </div>
+            <div style="display: {{ vcExpanded }}; align-items: center; gap: 14px">
+              <div style="display: flex; align-items: center; height: 26px">{{ vcWave }}</div>
+              <div style="font-size: 17px; color: #dfe4ec; white-space: nowrap">{{ vcText }}</div>
+            </div>
+          </div>
+        </div>
+        <div style="font-size: 15px; color: #7d859a; text-wrap: pretty">Click the bubble. At rest it's a single dot; while you talk it widens to show it's hearing you, then confirms and shrinks back.</div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 14px">
+        <div style="font-size: 17px; color: #b6becd">Page Reader — reading</div>
+        <div style="width: 560px; height: 260px; box-sizing: border-box; position: relative; border-radius: 16px; background: #1b1d21; border: 1px solid #24262c; overflow: hidden; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 26px">
+          <div style="position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; padding: 26px 30px; opacity: 0.42">
+            <div style="width: 220px; height: 15px; border-radius: 4px; background: #33363d"></div>
+            <div style="width: 100%; height: 11px; border-radius: 4px; background: #3d4a63"></div>
+            <div style="width: 92%; height: 11px; border-radius: 4px; background: #3d4a63"></div>
+            <div style="width: 100%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+            <div style="width: 70%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+          </div>
+          <div style="position: relative; display: flex; align-items: center; gap: 16px; height: 64px; padding: 0 12px 0 12px; border-radius: 999px; background: rgba(18,20,25,0.92); border: 1px solid #2e333e; box-shadow: 0 12px 34px rgba(0,0,0,0.55)">
+            <div data-act="pr" style="width: 48px; height: 48px; flex: none; border-radius: 50%; display: flex; align-items: center; justify-content: center; gap: 5px; background: #2b3a63; border: 2px solid #6f9bff; cursor: pointer">
+              <div style="display: {{ prPauseDisplay }}; align-items: center; gap: 5px">
+                <div style="width: 6px; height: 18px; border-radius: 2px; background: #eaf0ff"></div>
+                <div style="width: 6px; height: 18px; border-radius: 2px; background: #eaf0ff"></div>
+              </div>
+              <div style="display: {{ prPlayDisplay }}; width: 0; height: 0; border-left: 15px solid #eaf0ff; border-top: 9px solid transparent; border-bottom: 9px solid transparent; margin-left: 4px"></div>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 6px; width: 260px">
+              <div style="font-size: 17px; color: #dfe4ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{ prText }}</div>
+              <div style="height: 5px; border-radius: 3px; background: #2b3038">
+                <div style="width: {{ prProgress }}; height: 5px; border-radius: 3px; background: #6f9bff"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="font-size: 15px; color: #7d859a; text-wrap: pretty">One 48px button — pause or resume. Nothing else. The three reading options moved to the hub.</div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 14px">
+        <div style="font-size: 17px; color: #b6becd">Tone &amp; Social Cues — appears by your selection</div>
+        <div style="width: 560px; height: 380px; box-sizing: border-box; position: relative; border-radius: 16px; background: #1b1d21; border: 1px solid #24262c; overflow: hidden; padding: 26px 30px">
+          <div style="display: flex; flex-direction: column; gap: 12px; opacity: 0.5">
+            <div style="width: 200px; height: 15px; border-radius: 4px; background: #33363d"></div>
+            <div style="width: 100%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+            <div style="width: 78%; height: 11px; border-radius: 4px; background: #6a5a34"></div>
+          </div>
+          <div style="position: absolute; left: 30px; top: 132px; width: 400px; display: flex; flex-direction: column; gap: 12px; padding: 20px 22px; border-radius: 16px; background: rgba(18,20,25,0.95); border: 1px solid #2e333e; box-shadow: 0 16px 40px rgba(0,0,0,0.6)">
+            <div style="display: flex; align-items: center; gap: 12px">
+              <div style="font-size: 17px; font-weight: 600; padding: 6px 14px; border-radius: 999px; background: #3a2f1c; border: 1px solid #7a6134; color: #ffd68a">polite but impatient</div>
+            </div>
+            <div style="font-size: 19px; line-height: 1.45; text-wrap: pretty">They're being friendly, but they want this today. “Circling back again” hints they felt ignored.</div>
+            <div data-act="tone" style="height: 52px; display: flex; align-items: center; justify-content: center; border-radius: 12px; border: 2px solid #2e333e; background: #1e222a; font-size: 18px; cursor: pointer" style-hover="border-color: #6f9bff">Got it</div>
+          </div>
+        </div>
+        <div style="font-size: 15px; color: #7d859a; text-wrap: pretty">Answer first, one large dismiss button. No tone jargon, no confidence scores, no settings.</div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 14px">
+        <div style="font-size: 17px; color: #b6becd">Dyslexia Font — a quiet confirmation, then it goes away</div>
+        <div style="width: 560px; height: 300px; box-sizing: border-box; position: relative; border-radius: 16px; background: #1b1d21; border: 1px solid #24262c; overflow: hidden; display: flex; align-items: flex-start; justify-content: flex-end; padding: 22px">
+          <div style="position: absolute; left: 30px; top: 26px; right: 200px; display: flex; flex-direction: column; gap: 13px; opacity: 0.55">
+            <div style="width: 180px; height: 15px; border-radius: 4px; background: #33363d"></div>
+            <div style="width: 100%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+            <div style="width: 96%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+            <div style="width: 88%; height: 11px; border-radius: 4px; background: #2a2d33"></div>
+          </div>
+          <div style="position: relative; display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 20px; border-radius: 999px; background: rgba(18,20,25,0.92); border: 1px solid #2e333e; box-shadow: 0 12px 34px rgba(0,0,0,0.55)">
+            <div style="width: 12px; height: 12px; border-radius: 50%; background: #4ad991"></div>
+            <div style="font-size: 17px; color: #dfe4ec">Easier font on</div>
+          </div>
+        </div>
+        <div style="font-size: 15px; color: #7d859a; text-wrap: pretty">It has no runtime controls at all — the font choice, spacing and preview belong in the hub.</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 28px">
+    <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">2 · Where the instructions went — a walkthrough in the hub</div>
+
+    <div style="display: flex; flex-wrap: wrap; gap: 48px; align-items: flex-start">
+      <div style="position: relative; width: 700px; height: 520px; box-sizing: border-box; border-radius: 14px; background: #14161b; border: 1px solid #262a33; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.6)">
+        <div style="height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid #1f232b">
+          <div style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f57"></div>
+          <div style="width: 12px; height: 12px; border-radius: 50%; background: #febc2e"></div>
+          <div style="width: 12px; height: 12px; border-radius: 50%; background: #28c840"></div>
+        </div>
+        <div style="padding: 28px 36px; display: flex; flex-direction: column; gap: 14px; opacity: 0.32">
+          <div style="font-size: 30px; font-weight: 600">Accessibility4all</div>
+          <div style="height: 90px; border-radius: 16px; background: #191c23; border: 2px solid #4ad991"></div>
+          <div style="height: 90px; border-radius: 16px; background: #191c23; border: 2px solid #262a33"></div>
+          <div style="height: 90px; border-radius: 16px; background: #191c23; border: 2px solid #262a33"></div>
+        </div>
+        <div style="position: absolute; inset: 40px 0 0; background: rgba(6,7,10,0.72); display: flex; align-items: center; justify-content: center; padding: 28px">
+          <div style="width: 560px; box-sizing: border-box; padding: 32px; border-radius: 20px; background: #191c23; border: 1px solid #2e333e; box-shadow: 0 24px 60px rgba(0,0,0,0.6); display: flex; flex-direction: column; gap: 20px">
+            <div style="font-size: 15px; color: #7d859a">{{ walkCount }}</div>
+            <div style="font-size: 28px; font-weight: 600; letter-spacing: -0.3px; text-wrap: pretty">{{ walkTitle }}</div>
+            <div style="font-size: 20px; line-height: 1.5; color: #dfe4ec; text-wrap: pretty">{{ walkBody }}</div>
+            <div style="display: flex; align-items: center; gap: 8px">
+              <sc-for list="{{ walkDots }}" as="d" hint-placeholder-count="3">
+                <div style="width: 10px; height: 10px; border-radius: 50%; background: {{ d.color }}"></div>
+              </sc-for>
+            </div>
+            <div style="display: flex; gap: 12px">
+              <div data-act="walk-back" style="height: 60px; flex: none; padding: 0 24px; display: flex; align-items: center; justify-content: center; border-radius: 12px; border: 2px solid #2e333e; background: #1e222a; font-size: 18px; color: {{ backColor }}; cursor: pointer" style-hover="border-color: #6f9bff">Back</div>
+              <div data-act="walk-next" style="height: 60px; flex: 1; display: flex; align-items: center; justify-content: center; border-radius: 12px; background: #2b3a63; border: 2px solid #6f9bff; font-size: 20px; font-weight: 600; color: #eaf0ff; cursor: pointer" style-hover="filter: brightness(1.12)">{{ nextLabel }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 14px">
+        <div style="font-size: 17px; color: #b6becd">…and the settings that used to sit on the sub-UI</div>
+        <div style="width: 480px; box-sizing: border-box; border-radius: 16px; background: #14161b; border: 1px solid #262a33; box-shadow: 0 24px 60px rgba(0,0,0,0.55); display: flex; flex-direction: column">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 22px 24px 18px; border-bottom: 1px solid #1f232b">
+            <div style="font-size: 22px; font-weight: 600">Page Reader</div>
+            <div style="font-size: 17px; color: #7d859a">Settings</div>
+          </div>
+          <div onClick="{{ noop }}" style="padding: 22px 24px; display: flex; flex-direction: column; gap: 12px">
+            <sc-for list="{{ prOptions }}" as="o" hint-placeholder-count="3">
+              <div data-act="pr-opt" data-id="{{ o.id }}" role="switch" tabindex="0" style="display: flex; align-items: center; gap: 18px; padding: 18px 20px; border-radius: 14px; background: #191c23; border: 2px solid; border-color: {{ o.border }}; cursor: pointer" style-hover="background: #1d212a">
+                <div style="flex: 1; font-size: 19px; font-weight: 600; text-wrap: pretty">{{ o.name }}</div>
+                <div style="font-size: 17px; font-weight: 600; color: {{ o.color }}">{{ o.label }}</div>
+                <div style="width: 72px; height: 40px; flex: none; border-radius: 20px; padding: 4px; box-sizing: border-box; display: flex; background: {{ o.track }}">
+                  <div style="width: 32px; height: 32px; border-radius: 50%; background: #ffffff; margin-left: {{ o.knob }}"></div>
+                </div>
+              </div>
+            </sc-for>
+            <div style="display: flex; align-items: center; gap: 14px; padding: 16px 20px; border-radius: 14px; background: #191c23; border: 1px solid #262a33">
+              <div style="flex: 1; font-size: 18px">Shortcut key</div>
+              <div style="font-size: 20px; font-weight: 600; padding: 8px 16px; border-radius: 10px; background: #21252e; border: 1px solid #343a46">F9</div>
+              <div style="height: 52px; padding: 0 20px; display: flex; align-items: center; border-radius: 12px; border: 2px solid #2e333e; font-size: 17px; cursor: pointer" style-hover="border-color: #6f9bff">Change</div>
+            </div>
+            <div data-act="walk-open" style="height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 12px; border: 2px solid #2e333e; background: #1e222a; font-size: 18px; cursor: pointer" style-hover="border-color: #6f9bff">Show me how to use it</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{}">
+const WALK = [
+  { title: "Hold the ` key and just talk", body: "Press and hold the key to the left of the 1. Say something like “open a new tab” or “scroll down”, then let go." },
+  { title: "A small dot shows it heard you", body: "While you talk, a bubble at the bottom of the screen widens so you can see it's listening. It shrinks back on its own." },
+  { title: "If it can't find something, say it differently", body: "Try naming what you see on screen — “click the blue Sign in button” works better than “click sign in”." },
+];
+
+class Component extends DCLogic {
+  state = { vc: "idle", pr: true, walk: 0, prOpts: { voice_guided: true, hover: false, summary: true } };
+
+  bars(count, height, width) {
+    const on = this.state.vc === "listening";
+    return React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4, height } },
+      Array.from({ length: count }, (_, i) => React.createElement("div", {
+        key: i,
+        style: {
+          width, height, borderRadius: width / 2, background: on ? "#8ab4ff" : "#3a4051",
+          transformOrigin: "center", transform: on ? undefined : "scaleY(0.2)",
+          animation: on ? `bb-bar ${0.6 + (i % 5) * 0.1}s ease-in-out ${i * 0.05}s infinite` : "none",
+        },
+      })));
+  }
+
+  sw(on) {
+    return { border: on ? "#4ad991" : "#262a33", track: on ? "#4ad991" : "#3a4051",
+      knob: on ? "32px" : "0px", label: on ? "On" : "Off", color: on ? "#4ad991" : "#7d859a" };
+  }
+
+  renderVals() {
+    const s = this.state;
+    const listening = s.vc === "listening";
+    const done = s.vc === "done";
+    const step = WALK[s.walk];
+    return {
+      noop: () => {},
+      vcExpanded: s.vc === "idle" ? "none" : "flex",
+      vcPad: s.vc === "idle" ? "0 10px" : "0 22px 0 10px",
+      vcBorder: listening ? "#6f9bff" : "#2e333e",
+      vcPulse: listening ? "block" : "none",
+      vcDotBg: listening ? "#2b3a63" : done ? "#1f3a2c" : "#262a33",
+      vcDotFg: listening ? "#eaf0ff" : done ? "#8ff0bb" : "#9aa3b4",
+      vcWave: this.bars(9, 26, 4),
+      vcText: listening ? "Listening…" : "Opened a new tab",
+
+      prPauseDisplay: s.pr ? "flex" : "none",
+      prPlayDisplay: s.pr ? "none" : "block",
+      prText: s.pr ? "Grants are open until the end of…" : "Paused",
+      prProgress: s.pr ? "62%" : "38%",
+
+      walkCount: "Step " + (s.walk + 1) + " of " + WALK.length,
+      walkTitle: step.title,
+      walkBody: step.body,
+      walkDots: WALK.map((_, i) => ({ color: i === s.walk ? "#6f9bff" : "#343a46" })),
+      backColor: s.walk === 0 ? "#565e6e" : "#f4f6fa",
+      nextLabel: s.walk === WALK.length - 1 ? "Got it" : "Next",
+
+      prOptions: [
+        { id: "voice_guided", name: "Let me pick sections by voice", ...this.sw(s.prOpts.voice_guided) },
+        { id: "hover", name: "Read when I rest the pointer", ...this.sw(s.prOpts.hover) },
+        { id: "summary", name: "Skip the clutter", ...this.sw(s.prOpts.summary) },
+      ],
+    };
+  }
+
+  componentDidMount() {
+    this._onClick = (e) => {
+      const el = e.target.closest("[data-act]");
+      if (!el) return;
+      const act = el.getAttribute("data-act");
+      const id = el.getAttribute("data-id");
+      if (act === "vc") this.setState(st => ({ vc: st.vc === "listening" ? "done" : st.vc === "done" ? "idle" : "listening" }));
+      else if (act === "pr") this.setState(st => ({ pr: !st.pr }));
+      else if (act === "pr-opt") this.setState(st => ({ prOpts: { ...st.prOpts, [id]: !st.prOpts[id] } }));
+      else if (act === "walk-next") this.setState(st => ({ walk: (st.walk + 1) % WALK.length }));
+      else if (act === "walk-back") this.setState(st => ({ walk: Math.max(0, st.walk - 1) }));
+      else if (act === "walk-open") this.setState({ walk: 0 });
+    };
+    document.addEventListener("click", this._onClick);
+  }
+
+  componentWillUnmount() { document.removeEventListener("click", this._onClick); }
+}
+</script>
+</body>
+</html>

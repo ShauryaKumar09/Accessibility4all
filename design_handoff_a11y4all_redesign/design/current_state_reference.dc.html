@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<style>
+  body { margin: 0; background: #0a0b0e; }
+  a { color: #8ab4ff; text-decoration: none; }
+  a:hover { color: #b0ccff; }
+</style>
+</helmet>
+<div style="min-height: 100vh; padding: 48px 56px 80px; background: #0a0b0e; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #f4f6fa">
+
+  <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 40px">
+    <div style="font-size: 13px; letter-spacing: 1.6px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Today — recreated from each feature's main.py</div>
+    <div style="font-size: 30px; font-weight: 600; letter-spacing: -0.4px">The four feature windows</div>
+    <div style="font-size: 17px; color: #b6becd; max-width: 720px; text-wrap: pretty">Each one is its own always-on-top Tk window that opens when you flip that feature on in the hub. Shown at their real pixel sizes.</div>
+  </div>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 44px; align-items: flex-start">
+
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Voice Control · 300 × 360</div>
+      <div style="width: 300px; height: 360px; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1a2e; border: 1px solid #2a2a45; box-shadow: 0 18px 44px rgba(0,0,0,0.5)">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px 2px">
+          <div style="font-size: 11px; font-weight: bold; color: #e8e8ff">Accessibility4all</div>
+          <div style="background: #3a3a55; color: #ffffff; font-size: 15px; line-height: 1.1; padding: 0 7px">●</div>
+        </div>
+        <div style="padding: 4px 16px 2px; font-size: 10px; color: #8a8ab0">Ready</div>
+        <div style="flex: 1; min-height: 0; margin: 0 16px 6px; background: #15152b; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; overflow: hidden">
+          <div style="font-size: 11px; line-height: 1.35"><span style="font-size: 9px; color: #8a8ab0">You said&nbsp;&nbsp;</span><span style="color: #7aa2ff">open a new tab</span></div>
+          <div style="font-size: 11px; line-height: 1.35; color: #e8e8ff">Pressing ⌘T</div>
+          <div style="font-size: 11px; line-height: 1.35; color: #4ade80">✓ Opened a new tab</div>
+          <div style="font-size: 11px; line-height: 1.35"><span style="font-size: 9px; color: #8a8ab0">You said&nbsp;&nbsp;</span><span style="color: #7aa2ff">search for accessibility news</span></div>
+          <div style="font-size: 11px; line-height: 1.35; color: #5b8cff; font-style: italic">Looking at the screen…</div>
+        </div>
+        <div style="margin: 0 16px; width: 268px; height: 6px; background: #262642">
+          <div style="width: 96px; height: 6px; background: #5b8cff"></div>
+        </div>
+        <div style="padding: 4px 16px 0; font-size: 9px; color: #5a5a78">logged → trials.jsonl</div>
+        <div style="padding: 2px 16px 0; display: flex; align-items: center; gap: 6px">
+          <div style="width: 12px; height: 12px; background: #23233f; border: 1px solid #5a5a78"></div>
+          <div style="font-size: 9px; color: #e8e8ff">Always on (listen without holding `)</div>
+        </div>
+        <div style="padding: 0 16px 8px; font-size: 9px; color: #5a5a78">hold&nbsp;&nbsp;&nbsp;`&nbsp;&nbsp;&nbsp;to talk</div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Page Reader · 300 × 248</div>
+      <div style="width: 300px; height: 248px; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1a2e; border: 1px solid #2a2a45; box-shadow: 0 18px 44px rgba(0,0,0,0.5)">
+        <div style="padding: 10px 14px 4px; font-size: 11px; font-weight: bold; color: #e0e0ff">Page Reader</div>
+        <div style="padding: 0 14px; display: flex; flex-direction: column; gap: 3px">
+          <div style="display: flex; align-items: center; gap: 6px">
+            <div style="width: 12px; height: 12px; background: #23233f; border: 1px solid #5a5a78; display: flex; align-items: center; justify-content: center; font-size: 9px; color: #e0e0ff">✓</div>
+            <div style="font-size: 9px; color: #e0e0ff">Voice-guided sections (needs Voice Control)</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px">
+            <div style="width: 12px; height: 12px; background: #23233f; border: 1px solid #5a5a78"></div>
+            <div style="font-size: 9px; color: #e0e0ff">Hover-to-read (pause over text)</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px">
+            <div style="width: 12px; height: 12px; background: #23233f; border: 1px solid #5a5a78; display: flex; align-items: center; justify-content: center; font-size: 9px; color: #e0e0ff">✓</div>
+            <div style="font-size: 9px; color: #e0e0ff">Groq summary (important content only)</div>
+          </div>
+        </div>
+        <div style="padding: 8px 14px 0; display: flex; flex-direction: column; gap: 4px">
+          <div style="display: flex; align-items: center; gap: 6px">
+            <div style="width: 76px; font-size: 9px; color: #8a8ab0">Read Chrome:</div>
+            <div style="flex: 1; font-size: 9px; font-weight: bold; color: #e0e0ff">F9</div>
+            <div style="background: #23233f; color: #e0e0ff; font-size: 8px; padding: 3px 6px">Set</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px">
+            <div style="width: 76px; font-size: 9px; color: #8a8ab0">Stop:</div>
+            <div style="flex: 1; font-size: 9px; font-weight: bold; color: #e0e0ff">F10</div>
+            <div style="background: #23233f; color: #e0e0ff; font-size: 8px; padding: 3px 6px">Set</div>
+          </div>
+        </div>
+        <div style="padding: 10px 14px 8px; font-size: 13px; font-weight: bold; color: #8a8ab0">Idle</div>
+        <div style="padding: 0 14px 8px; font-size: 8px; color: #5a5a78">Use hotkeys or voice — no on-screen buttons.</div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Tone &amp; Social Cues · 320 × 260</div>
+      <div style="width: 320px; height: 260px; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1a2e; border: 1px solid #2a2a45; box-shadow: 0 18px 44px rgba(0,0,0,0.5)">
+        <div style="padding: 10px 14px 4px; font-size: 11px; font-weight: bold; color: #e0e0ff">Tone &amp; Social Cues</div>
+        <div style="padding: 0 14px; display: flex; align-items: center; gap: 6px">
+          <div style="width: 12px; height: 12px; background: #23233f; border: 1px solid #5a5a78; display: flex; align-items: center; justify-content: center; font-size: 9px; color: #e0e0ff">✓</div>
+          <div style="font-size: 9px; color: #e0e0ff">Shift+Click to analyze in Chrome</div>
+        </div>
+        <div style="padding: 8px 14px 0; display: flex; align-items: center; gap: 6px">
+          <div style="width: 76px; font-size: 9px; color: #8a8ab0">Analyze:</div>
+          <div style="flex: 1; font-size: 9px; font-weight: bold; color: #e0e0ff">shift+command+'</div>
+          <div style="background: #23233f; color: #e0e0ff; font-size: 8px; padding: 3px 6px">Set</div>
+        </div>
+        <div style="padding: 8px 14px 0; display: flex; align-items: center; gap: 6px">
+          <div style="width: 88px; font-size: 9px; color: #8a8ab0">Panel text size:</div>
+          <div style="width: 40px; background: #23233f; color: #e0e0ff; font-size: 9px; text-align: center; padding: 3px 0">12</div>
+        </div>
+        <div style="padding: 10px 14px 6px; font-size: 13px; font-weight: bold; color: #8a8ab0">Idle</div>
+        <div style="padding: 0 14px 8px; font-size: 8px; color: #5a5a78">Highlight text anywhere, then press your hotkey.</div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Dyslexia Font · 430 × 430</div>
+      <div style="width: 430px; height: 430px; box-sizing: border-box; display: flex; flex-direction: column; padding: 14px 16px; background: #1a1a2e; border: 1px solid #2a2a45; box-shadow: 0 18px 44px rgba(0,0,0,0.5)">
+        <div style="font-size: 16px; font-weight: bold; color: #e0e0ff">Dyslexia Font</div>
+        <div style="font-size: 10px; color: #8a8ab0; padding-bottom: 12px">Windows website and app font helper</div>
+        <div style="display: flex; align-items: center; gap: 6px">
+          <div style="width: 13px; height: 13px; background: #23233f; border: 1px solid #5a5a78; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #e0e0ff">✓</div>
+          <div style="font-size: 12px; color: #e0e0ff">Website font mode</div>
+        </div>
+        <div style="font-size: 12px; color: #e0e0ff; padding: 10px 0 2px">Font</div>
+        <div style="display: flex; align-items: center; justify-content: space-between; background: #d9d9de; color: #16161f; font-size: 12px; padding: 4px 8px; border: 1px solid #9a9aa4">
+          <div>OpenDyslexic</div>
+          <div style="font-size: 9px; color: #4a4a55">▾</div>
+        </div>
+        <div style="display: flex; gap: 14px; padding-top: 10px">
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+            <div style="font-size: 12px; color: #e0e0ff">Letter spacing</div>
+            <div style="font-size: 10px; color: #e0e0ff">0.03</div>
+            <div style="height: 14px; display: flex; align-items: center; position: relative">
+              <div style="width: 100%; height: 3px; background: #0e0e1c; border: 1px solid #3d3d5c"></div>
+              <div style="position: absolute; left: 25%; width: 10px; height: 14px; background: #b9b9c4; border: 1px solid #6d6d80"></div>
+            </div>
+          </div>
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+            <div style="font-size: 12px; color: #e0e0ff">Line height</div>
+            <div style="font-size: 10px; color: #e0e0ff">1.55</div>
+            <div style="height: 14px; display: flex; align-items: center; position: relative">
+              <div style="width: 100%; height: 3px; background: #0e0e1c; border: 1px solid #3d3d5c"></div>
+              <div style="position: absolute; left: 45%; width: 10px; height: 14px; background: #b9b9c4; border: 1px solid #6d6d80"></div>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; padding: 8px 0 10px">
+          <div style="width: 13px; height: 13px; background: #23233f; border: 1px solid #5a5a78"></div>
+          <div style="font-size: 12px; color: #e0e0ff">Use bold website text</div>
+        </div>
+        <div style="display: flex; gap: 8px; padding-bottom: 12px">
+          <div style="background: #d9d9de; color: #16161f; font-size: 12px; padding: 4px 10px; border: 1px solid #9a9aa4">Open extension folder</div>
+          <div style="background: #d9d9de; color: #16161f; font-size: 12px; padding: 4px 10px; border: 1px solid #9a9aa4">Open Chrome extensions</div>
+        </div>
+        <div style="height: 1px; background: #33335a; margin-bottom: 10px"></div>
+        <div style="font-size: 12px; color: #ffd166; line-height: 1.35">This feature is intended for Windows.</div>
+        <div style="display: flex; gap: 8px; padding-top: 10px">
+          <div style="background: #d9d9de; color: #8b8b93; font-size: 12px; padding: 4px 10px; border: 1px solid #9a9aa4">Apply Windows substitution</div>
+          <div style="background: #d9d9de; color: #16161f; font-size: 12px; padding: 4px 10px; border: 1px solid #9a9aa4">Restore Windows fonts</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: #6f7789; font-family: ui-monospace, Menlo, monospace">Tone analysis panel · 520 × 600</div>
+      <div style="width: 520px; height: 600px; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1a2e; border: 1px solid #2a2a45; box-shadow: 0 18px 44px rgba(0,0,0,0.5)">
+        <div style="padding: 12px 16px 6px; font-size: 13px; font-weight: bold; color: #e0e0ff">Tone analysis</div>
+        <div style="flex: 1; min-height: 0; margin: 0 16px 6px; display: flex">
+          <div style="flex: 1; min-width: 0; background: #23233f; padding: 10px 12px; font-size: 12px; color: #e0e0ff; line-height: 1.5; display: flex; flex-direction: column; gap: 2px">
+            <div style="font-size: 13px; font-weight: bold">Summary</div>
+            <div>The message is polite on the surface but carries some time pressure, and the closing line reads as mildly annoyed rather than neutral.</div>
+            <div style="height: 12px"></div>
+            <div><span style="font-weight: bold; color: #748ffc">Tone: </span>polite but impatient</div>
+            <div style="height: 12px"></div>
+            <div style="font-size: 13px; font-weight: bold">What stood out</div>
+            <div style="height: 6px"></div>
+            <div style="font-weight: bold; color: #748ffc">Urgency / pressure</div>
+            <div><span style="font-size: 10px; color: #8a8ab0">What it says: </span><span style="font-style: italic; color: #8a8ab0">as soon as you get a chance</span></div>
+            <div><span style="font-size: 10px; color: #8a8ab0">What it likely means: </span>They probably want this today, even though it is phrased as optional.</div>
+            <div style="font-size: 10px; color: #8a8ab0">Confidence: medium</div>
+            <div style="height: 10px"></div>
+            <div style="font-weight: bold; color: #748ffc">Passive aggression</div>
+            <div><span style="font-size: 10px; color: #8a8ab0">What it says: </span><span style="font-style: italic; color: #8a8ab0">just circling back again</span></div>
+            <div><span style="font-size: 10px; color: #8a8ab0">What it likely means: </span>The word “again” hints they feel ignored by the earlier message.</div>
+            <div style="font-size: 10px; color: #8a8ab0">Confidence: low</div>
+          </div>
+          <div style="width: 15px; background: #d4d4d4; border-left: 1px solid #b0b0b0"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

@@ -27,8 +27,9 @@ echo "GROQ_API_KEY=your_key_here" > .env
 python hub.py
 ```
 
-The hub window lists every feature with an **OFF/ON** toggle. Toggle one ON and
-it launches as its own process; toggle OFF and it's stopped.
+The hub window lists every feature as a large row with an **Off/On** switch.
+Toggle one ON and it launches as its own process; toggle OFF and it's stopped.
+**Settings** on a row opens that feature's settings and its walkthrough.
 
 > **Run from a terminal while developing** — each feature's logs print to the
 > hub's terminal, which is how you debug.
@@ -57,15 +58,23 @@ Chrome for full functionality.
 ## Architecture
 
 ```
-hub.py                  ← MAIN ENTRY POINT: the toggle launcher (tkinter)
-hub_state.json          ← auto-created; remembers which toggles were on
+hub.py                  ← MAIN ENTRY POINT: toggles + every feature's settings
+hub_state.json          ← auto-created; toggles, text size, walkthroughs seen
 requirements.txt        ← shared deps for the hub + all features
 .env                    ← secrets (GROQ_API_KEY); git-ignored, never committed
+shared/
+├── ui_kit.py           ← design tokens + canvas-drawn widgets (the whole look)
+├── settings_store.py   ← per-feature settings.json + a change Watcher
+├── hotkeys.py          ← hotkey strings, and capture from a tkinter key event
+├── windows_fonts.py    ← Windows font substitution (hub + dyslexia_font)
+├── feature_bus.py      ← file-based IPC (commands, presence)
+├── screen_ocr.py       ├── platform.py  ├── groq_vision.py  ├── console.py
 features/
 ├── README.md           ← the feature-developer contract (READ THIS to add one)
 ├── _template/          ← copy-me starter (folders starting with _ are hidden)
 └── voice_control/      ← the first real feature (voice → Chrome control)
     ├── feature.json    ← manifest (name, description, entry, version, author)
+    ├── settings.json   ← this feature's settings; the HUB writes them
     └── main.py         ← runnable entry point
 ```
 
@@ -81,12 +90,47 @@ process** (`subprocess.Popen([python, entry], cwd=feature_dir)`):
 - **Persistence:** enabled toggles are saved to `hub_state.json` and auto-started
   next launch.
 - **Discovery rules:** folders named with a leading `_` or `.` are ignored
-  (that's why `_template/` never appears). Use the **Rescan features** button to
-  pick up folders added while the hub is running — no hub code changes needed.
+  (that's why `_template/` never appears). Known features are listed in a fixed
+  order (`FEATURE_ORDER`) and anything new is appended — no hub code changes
+  needed, but restart the hub to pick up a folder added while it was running
+  (the Rescan button was removed in the redesign).
 
 This process-per-feature model is deliberate: it lets separate developers own
 separate folders without merge conflicts, and it's required because GUI features
 (like voice control) each need their own tkinter main loop.
+
+### Where the UI lives (redesign)
+
+The split is: **the hub is the place with controls; a running feature only shows
+live state.**
+
+- **Hub window** (800px wide at text scale 1.0, height fits the content, never
+  scrolls) — one big row per feature. The whole row toggles the feature (click,
+  Space or Return); state is the word On/Off plus a green border plus the switch
+  position, so it never depends on colour alone. Each row also has a **Settings**
+  button, and the footer has `N of 4 features on` plus **A− / A+**, which rescale
+  every font AND regrow the window so nothing is clipped.
+- **Settings sheet** (per feature, opened from its row) — the switches, shortcut
+  keys, font picker and steppers that used to sit in each feature's own window.
+  It writes `features/<id>/settings.json`; the running feature notices via
+  `settings_store.Watcher` (polled ~700ms) and re-applies without a restart.
+- **Walkthrough** — a three-step modal over the hub, opened from the sheet
+  ("Show me how to use it") and automatically the first time a feature is turned
+  on (`seen_walkthrough` in `hub_state.json`).
+- **Feature bubbles** — each running feature draws one small borderless
+  always-on-top window with live state only: no settings, no shortcut rows, no
+  instructions.
+
+Everything is drawn on a `tk.Canvas` using `shared/ui_kit.py` (tokens `C`,
+`FontSet`, `rounded_rect`, `pill`, `draw_switch`, `TapCanvas`, `TextButton`,
+`CircleButton`, `progress_bar`). Follow that pattern rather than introducing ttk
+themes or a second toolkit. Minimum target size is 48px, body copy never below
+17px, and every interactive element keeps a 2px `#6f9bff` focus ring.
+
+Two tkinter limits the design works around: there is no translucency (rgba
+values are pre-blended to solid fills, and a "fading" ring fades its colour
+toward the surface with `ui.fade`), and there is no CSS animation (width and
+waveform animation are `after()` frame loops).
 
 ---
 
@@ -97,7 +141,10 @@ separate folders without merge conflicts, and it's required because GUI features
 3. Replace `main.py` with your code. It **must be runnable on its own**
    (`python features/your_feature/main.py`) with cwd = your folder.
 4. List any new deps in `requirements.txt`.
-5. Run `python hub.py`, click **Rescan features**, toggle your feature on.
+5. Run `python hub.py` and toggle your feature on. Add a row of plain-language
+   copy to `FEATURE_COPY` in `hub.py`, and a three-step `WALKTHROUGHS` entry, so
+   your feature reads like the rest; without them the hub falls back to your
+   `feature.json` description.
 
 Full contract (signals, logging, shared state, gotchas) is in
 **`features/README.md`**. Read it before building.

@@ -5,6 +5,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*audioo
 
 import os
 import re
+import math
 import sys
 import json
 import time
@@ -22,7 +23,6 @@ from PIL import ImageDraw
 import speech_recognition as sr
 import pytesseract
 import tkinter as tk
-from tkinter import font as tkfont
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -33,7 +33,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, feature_bus, platform as plat, screen_ocr, groq_vision  # noqa: E402
+from shared import (console, feature_bus, platform as plat, screen_ocr,  # noqa: E402
+                    groq_vision, settings_store as store, ui_kit as ui)
+from shared.ui_kit import C  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
@@ -44,17 +46,11 @@ SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
 
 def default_settings() -> dict:
-    return {"always_on": False}
+    return dict(store.DEFAULTS["voice_control"])
 
 
 def load_settings() -> dict:
-    s = default_settings()
-    if SETTINGS_FILE.exists():
-        try:
-            s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-        except Exception as e:
-            log("SETTINGS", f"bad settings.json: {e} — using defaults", "WARN")
-    return s
+    return store.load("voice_control")
 
 
 def save_settings(settings: dict):
@@ -1323,17 +1319,29 @@ def execute_action(action: dict) -> str:
         return f"Unknown action: {kind}"
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-# Compact dark palette
-BG = "#1a1a2e"; CARD = "#262642"; TEXT = "#e8e8ff"; MUTED = "#8a8ab0"
-ACCENT = "#5b8cff"; REC = "#ff5a5f"; OK = "#4ade80"; WARN = "#ffb86b"
-IDLE_DOT = "#3a3a55"
+# A desktop bubble: a mic dot at rest, widening while you talk, then one line
+# saying what happened. The transcript, meter, "Always on" checkbox and the
+# "hold ` to talk" hint all moved out — Always on into the hub's settings sheet,
+# the instructions into the hub's walkthrough.
+TEXT = C["FG_BUBBLE"]; MUTED = C["FG_MUTED"]
+ACCENT = C["ACCENT"]; REC = C["STOP_BORDER"]; OK = C["ON"]; WARN = C["WARM_TEXT"]
 IDLE_MSG = "Ready"
-ALWAYS_ON_MSG = "Always on — speak a command"
-METER_W, METER_H = 268, 6
-WIN_W, WIN_H = 300, 360
-CHAT_BG = "#15152b"        # transcript panel (slightly darker than the window)
-YOU_COL = "#7aa2ff"        # what we heard you say
-BOT_COL = "#e8e8ff"        # what the assistant is doing
+ALWAYS_ON_MSG = "Listening for a command"
+
+BUBBLE_H = 60
+DOT_D = 40                 # the mic circle
+PAD_L = 10
+PAD_R = 22                 # right padding once expanded
+GAP = 14
+WAVE_BARS, WAVE_BAR_W, WAVE_GAP, WAVE_H = 9, 4, 4, 26
+WAVE_W = WAVE_BARS * WAVE_BAR_W + (WAVE_BARS - 1) * WAVE_GAP
+COLLAPSED_W = PAD_L * 2 + DOT_D            # 60px — just the dot
+LISTENING_W = 256                          # the design's expanded width
+MAX_W = 360                                # result lines get a little more room
+EXPAND_MS = 180                            # width animation
+FRAME_MS = 33
+SETTINGS_WATCH_MS = 700
+WIN_W, WIN_H = COLLAPSED_W, BUBBLE_H       # presence starts at the resting size
 TALK_KEYCODE = 50          # macOS keycode for the ` / ~ key (kVK_ANSI_Grave)
 
 
@@ -1357,11 +1365,7 @@ class App(tk.Tk):
         # Page to return to if a command lands somewhere wrong (or the user says
         # "that's wrong, go back"). Captured before each acting command.
         self._undo_target: dict | None = None
-        # chat transcript: a queue of (role, text) streamed one word at a time so
-        # the panel reads like a little conversation instead of a flickering line.
-        self._chat_queue: list[tuple[str, str]] = []
-        self._chat_streaming = False
-        self._chat_live = False        # a transient bottom line (Listening…/Working…)
+        self._watcher = store.Watcher("voice_control")
         # Worker threads must NOT touch tkinter (and `after()` from a non-main
         # thread is dropped on macOS). They push UI updates onto this queue; the
         # main thread drains it in _drain_ui. This is what makes the live
@@ -1384,108 +1388,172 @@ class App(tk.Tk):
         self.destroy()
 
     def _build_ui(self):
+        """The bubble: a mic dot that widens while you talk.
+
+        Resting it is a 60px circle; listening it grows to 256px with a pulsing
+        ring, a waveform driven by the real mic level, and the word Listening…;
+        when a command finishes it shows one line of what happened and shrinks
+        back on its own.
+        """
         self.title("Accessibility4all")
         self.resizable(False, False)
-        self.configure(bg=BG)
-        self.attributes("-topmost", True)
+        self.fonts = ui.FontSet(1.0)
 
-        # header: app name + mic dot (also a click-and-hold fallback for talk)
-        header = tk.Frame(self, bg=BG)
-        header.pack(fill="x", padx=14, pady=(10, 2))
-        tk.Label(header, text="Accessibility4all",
-                 font=tkfont.Font(family="Helvetica", size=11, weight="bold"),
-                 fg=TEXT, bg=BG).pack(side="left")
-        self.mic_btn = tk.Label(header, text="●",
-                                font=tkfont.Font(family="Helvetica", size=15),
-                                fg="white", bg=IDLE_DOT, padx=7, cursor="hand2")
-        self.mic_btn.pack(side="right")
+        self._state = "idle"              # idle | listening | working | done
+        self._text = ""
+        self._text_color = C["FG_BUBBLE"]
+        self._width = COLLAPSED_W
+        self._target_w = COLLAPSED_W
+        self._level = 0.0                 # mic energy, drives the waveform
+        self._phase = 0.0                 # waveform animation clock
+        self._pulse = 0.0                 # 0..1 ring expansion
+        self._animating = False
+
+        self._transparent = ui.make_bubble(self, MAX_W, BUBBLE_H)
+        self.canvas = ui.bubble_canvas(self, MAX_W, BUBBLE_H, self._transparent)
+        self.canvas.pack(fill="both", expand=True)
+
+        # the dot doubles as the click-and-hold fallback for the ` key
+        self.mic_btn = ui.CircleButton(
+            self.canvas, DOT_D, "mic", command=None, fill=C["DOT_IDLE"],
+            border=None, glyph=C["DOT_IDLE_FG"], takefocus=0)
         self.mic_btn.bind("<ButtonPress-1>", lambda e: self._start_recording())
         self.mic_btn.bind("<ButtonRelease-1>", lambda e: self._stop_and_process())
+        self.canvas.create_window(PAD_L, BUBBLE_H / 2, window=self.mic_btn,
+                                  anchor="w", tags="dot")
 
-        # thin live-state line (Listening / Ready) above the conversation
-        self.status_var = tk.StringVar(value="")
-        self.status_label = tk.Label(
-            self, textvariable=self.status_var,
-            font=tkfont.Font(family="Helvetica", size=10),
-            fg=MUTED, bg=BG, wraplength=METER_W + 4, justify="left", anchor="w",
-        )
-        self.status_label.pack(fill="x", padx=16, pady=(4, 2))
-
-        # conversation transcript — streams what we heard and what we're doing
-        chat_wrap = tk.Frame(self, bg=CHAT_BG, highlightthickness=0)
-        chat_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 6))
-        self._chat = tk.Text(
-            chat_wrap, height=8, width=1, wrap="word", bd=0,
-            bg=CHAT_BG, fg=BOT_COL, insertwidth=0, cursor="arrow",
-            font=tkfont.Font(family="Helvetica", size=11),
-            padx=8, pady=6, spacing1=2, spacing3=4, state="disabled",
-            highlightthickness=0, takefocus=0,
-        )
-        self._chat.pack(fill="both", expand=True)
-        self._chat.tag_configure("you", foreground=YOU_COL)
-        self._chat.tag_configure("you_lbl", foreground=MUTED,
-                                 font=tkfont.Font(family="Helvetica", size=9))
-        self._chat.tag_configure("bot", foreground=BOT_COL)
-        self._chat.tag_configure("ok", foreground=OK)
-        self._chat.tag_configure("warn", foreground=WARN)
-        self._chat.tag_configure("live", foreground=ACCENT,
-                                 font=tkfont.Font(family="Helvetica", size=11,
-                                                  slant="italic"))
-
-        # thin audio meter (shows it's hearing you)
-        self._meter_canvas = tk.Canvas(self, width=METER_W, height=METER_H,
-                                       bg=CARD, highlightthickness=0)
-        self._meter_canvas.pack(padx=16)
-        self._meter_bar = self._meter_canvas.create_rectangle(
-            0, 0, 0, METER_H, fill=ACCENT, outline="")
-
-        # trial info + persistent hint
-        self._trial_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self._trial_var,
-                 font=tkfont.Font(family="Helvetica", size=9),
-                 fg="#5a5a78", bg=BG, anchor="w").pack(fill="x", padx=16, pady=(4, 0))
-
-        toggles = tk.Frame(self, bg=BG)
-        toggles.pack(fill="x", padx=16, pady=(2, 0))
-        self._always_on_var = tk.BooleanVar(value=self._always_on)
-        tk.Checkbutton(
-            toggles, text="Always on (listen without holding `)",
-            variable=self._always_on_var, command=self._on_always_on_toggle,
-            font=tkfont.Font(family="Helvetica", size=9),
-            fg=TEXT, bg=BG, selectcolor=CARD, activebackground=BG,
-            activeforeground=TEXT,
-        ).pack(anchor="w")
-
-        self._hint_var = tk.StringVar(value="hold   `   to talk")
-        tk.Label(self, textvariable=self._hint_var,
-                 font=tkfont.Font(family="Helvetica", size=9),
-                 fg="#5a5a78", bg=BG, anchor="w").pack(fill="x", padx=16, pady=(0, 8))
-
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{WIN_W}x{WIN_H}+{sw - WIN_W - 24}+{sh - WIN_H - 80}")
-        self.lift()
-        self.bind("<Configure>", lambda e: self.after(100, self._update_presence))
+        self._apply_geometry()
+        self._draw_bubble()
+        self.after(120, lambda: ui.raise_bubble(self))
         self.after(100, self._update_presence)
+        self.after(SETTINGS_WATCH_MS, self._watch_settings)
+
+    # ── bubble drawing + animation ──
+    def _bubble_position(self) -> tuple[int, int]:
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        return max(0, (sw - int(self._width)) // 2), sh - BUBBLE_H - 80
+
+    def _apply_geometry(self):
+        x, y = self._bubble_position()
+        self.geometry(f"{int(self._width)}x{BUBBLE_H}+{x}+{y}")
+        self.canvas.configure(width=int(self._width))
+
+    def _set_state(self, state: str, text: str = "", color: str | None = None):
+        """Move the bubble between idle / listening / working / done."""
+        self._state = state
+        self._text = text
+        self._text_color = color or C["FG_BUBBLE"]
+        if state == "idle":
+            self._target_w = COLLAPSED_W
+        elif state == "listening":
+            self._target_w = LISTENING_W
+        else:
+            needed = (PAD_L + DOT_D + GAP
+                      + self.fonts["ui"].measure(text or "") + PAD_R)
+            self._target_w = max(COLLAPSED_W, min(MAX_W, needed))
+        self._start_animation()
+
+    def _start_animation(self):
+        if not self._animating:
+            self._animating = True
+            self.after(FRAME_MS, self._animate)
+
+    def _animate(self):
+        step = (LISTENING_W - COLLAPSED_W) * FRAME_MS / EXPAND_MS
+        moving = abs(self._width - self._target_w) > 1
+        if moving:
+            direction = 1 if self._target_w > self._width else -1
+            self._width += direction * min(step, abs(self._target_w - self._width))
+            self._apply_geometry()
+        elif self._width != self._target_w:
+            self._width = self._target_w
+            self._apply_geometry()
+
+        if self._state == "listening":
+            self._phase += FRAME_MS / 1000.0
+            self._pulse = (self._pulse + FRAME_MS / 1600.0) % 1.0
+        self._draw_bubble()
+
+        if moving or self._state == "listening":
+            self.after(FRAME_MS, self._animate)
+        else:
+            self._animating = False
+
+    def _dot_colors(self) -> tuple[str, str]:
+        if self._state == "listening":
+            return C["ACCENT_FILL"], C["ACCENT_ON"]
+        if self._state == "done":
+            return C["DOT_DONE"], C["DOT_DONE_FG"]
+        if self._state == "working":
+            return C["ACCENT_FILL"], C["ACCENT_ON"]
+        return C["DOT_IDLE"], C["DOT_IDLE_FG"]
+
+    def _draw_bubble(self):
+        w = int(self._width)
+        self.canvas.delete("bubble")
+        border = C["ACCENT"] if self._state == "listening" else C["BORDER_CTRL"]
+        ui.pill(self.canvas, 1, 1, w - 1, BUBBLE_H - 1, fill=C["BUBBLE"],
+                outline=border, width=1, tags="bubble")
+        self.canvas.tag_lower("bubble")
+
+        fill, glyph = self._dot_colors()
+        self.mic_btn.set_style(fill=fill, glyph=glyph)
+
+        cx, cy = PAD_L + DOT_D / 2, BUBBLE_H / 2
+        if self._state == "listening":
+            # the design's pulsing ring: expands 1 -> 1.6 while fading out, and
+            # tkinter has no alpha, so the colour fades toward the bubble fill
+            scale = 1.0 + 0.6 * self._pulse
+            r = DOT_D / 2 * scale
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="",
+                                    outline=ui.fade(C["ACCENT"], C["BUBBLE"],
+                                                  self._pulse),
+                                    width=2, tags="bubble")
+
+        x = PAD_L + DOT_D + GAP
+        if self._state == "listening" and w > COLLAPSED_W + 40:
+            level = max(0.15, min(1.0, self._level / 2500.0))
+            for i in range(WAVE_BARS):
+                amp = 0.2 + 0.8 * level * (
+                    0.5 + 0.5 * math.sin(self._phase * 6.0 + i * 0.7))
+                bar_h = max(4, WAVE_H * amp)
+                bx = x + i * (WAVE_BAR_W + WAVE_GAP)
+                self.canvas.create_rectangle(
+                    bx, cy - bar_h / 2, bx + WAVE_BAR_W, cy + bar_h / 2,
+                    fill=C["WAVE"], outline="", tags="bubble")
+            x += WAVE_W + GAP
+
+        if self._text and w > COLLAPSED_W + 20:
+            avail = w - x - PAD_R
+            if avail > 20:
+                self.canvas.create_text(
+                    x, cy, anchor="w", font=self.fonts["ui"],
+                    text=ui.ellipsize(self.fonts["ui"], self._text, avail),
+                    fill=self._text_color, tags="bubble")
 
     def _update_presence(self):
+        x, y = self._bubble_position()
         feature_bus.update_presence(
             "voice_control",
             os.getpid(),
-            {"x": self.winfo_x(), "y": self.winfo_y(), "w": WIN_W, "h": WIN_H},
+            {"x": x, "y": y, "w": int(self._width), "h": BUBBLE_H},
         )
 
-    def _on_always_on_toggle(self):
-        self._always_on = self._always_on_var.get()
-        self.settings["always_on"] = self._always_on
-        save_settings(self.settings)
-        if self._always_on:
-            self._start_always_on()
-            self._hint_var.set("always on — pause after you speak")
-        else:
-            self._stop_always_on()
-            self._hint_var.set("hold   `   to talk")
-            if not self._busy and not self._recording:
-                self._reset_idle()
+    # ── settings (edited in the hub) ──
+    def _watch_settings(self):
+        if self._watcher.changed():
+            self.settings = load_settings()
+            always_on = bool(self.settings.get("always_on", False))
+            if always_on != self._always_on:
+                log("SETTINGS", f"always-on -> {always_on} (changed in the hub)")
+                self._always_on = always_on
+                if always_on:
+                    self._start_always_on()
+                else:
+                    self._stop_always_on()
+                    if not self._busy and not self._recording:
+                        self._reset_idle()
+        self.after(SETTINGS_WATCH_MS, self._watch_settings)
 
     def _start_always_on(self):
         if self._always_listener is None:
@@ -1494,7 +1562,6 @@ class App(tk.Tk):
             self._always_listener.start()
         except Exception as e:
             log("RECORD", f"always-on mic failed: {e}", "ERROR")
-            self._always_on_var.set(False)
             self._always_on = False
             self.settings["always_on"] = False
             save_settings(self.settings)
@@ -1520,14 +1587,10 @@ class App(tk.Tk):
             self._draw_meter(self._always_listener.level)
         self.after(30, self._poll_always_on_meter)
 
-    # ── meter (polled on the main thread; never updated from audio thread) ──
+    # ── mic level (polled on the main thread; never read from the audio thread) ──
     def _draw_meter(self, energy: float):
-        max_energy = 4000
-        width = min(int(energy / max_energy * METER_W), METER_W)
-        color = (OK if width > METER_W * 0.55
-                 else "#ffd166" if width > METER_W * 0.15 else ACCENT)
-        self._meter_canvas.coords(self._meter_bar, 0, 0, width, METER_H)
-        self._meter_canvas.itemconfig(self._meter_bar, fill=color)
+        """The old audio meter now drives the bubble's waveform height."""
+        self._level = energy
 
     def _poll_meter(self):
         if not self._recording:
@@ -1556,88 +1619,37 @@ class App(tk.Tk):
         self.after(40, self._drain_ui)
 
     def _set_status(self, msg: str, color: str = ACCENT):
-        self._post(lambda: (self.status_var.set(msg),
-                            self.status_label.configure(fg=color)))
+        """The bubble shows one line: what it heard, or what it did."""
+        def _apply():
+            state = "listening" if self._recording else (
+                "working" if self._busy else "done")
+            self._set_state(state, msg, color)
+        self._post(_apply)
 
     def _set_trial_info(self, msg: str):
-        self._post(lambda: self._trial_var.set(msg))
+        # Timings stay in the terminal — the bubble shows live state only.
+        if msg:
+            log("TRIAL", msg)
 
     def _set_indicator(self, state: str):
-        color = {"idle": IDLE_DOT, "rec": REC, "busy": ACCENT, "done": OK}.get(state, IDLE_DOT)
-        self._post(lambda: self.mic_btn.configure(bg=color))
+        mapped = {"rec": "listening", "busy": "working", "done": "done"}.get(
+            state, "idle")
+        if mapped == "idle":
+            self._post(lambda: self._set_state("idle"))
+        else:
+            self._post(lambda: self._set_state(mapped, self._text,
+                                               self._text_color))
 
-    # ── conversation transcript ─────────────────────────────────────────────────
-    # Worker threads narrate the pipeline by calling _chat_say(...). Messages are
-    # queued and streamed one word at a time on the main thread so the panel reads
-    # like a little chat (and stays tkinter-thread-safe).
+    # ── narration ───────────────────────────────────────────────────────────────
+    # The chat transcript went with the old window. Worker threads still narrate
+    # through these two calls; they now write the bubble's single line.
     def _chat_say(self, role: str, text: str):
-        """Append a permanent chat line. role: 'you','bot','ok','warn'."""
-        self._post(lambda: self._enqueue_chat(role, text))
+        color = {"you": C["FG_BUBBLE"], "ok": C["ON"], "warn": C["WARM_TEXT"]}.get(
+            role, C["FG_BUBBLE"])
+        self._set_status(text, color)
 
     def _chat_status(self, text: str):
-        """Show a transient, replaceable line at the bottom (Listening…/Working…).
-        Safe from any thread; superseded by the next permanent line."""
-        self._post(lambda: self._render_live(text))
-
-    def _render_live(self, text: str):
-        if self._chat_streaming:            # don't fight an animating message
-            return
-        self._chat.configure(state="normal")
-        if self._chat_live:                 # replace the previous live line
-            self._chat.delete("live", "end")
-        self._chat.mark_set("live", "end-1c")
-        self._chat.mark_gravity("live", "left")
-        sep = "" if self._chat.index("end-1c") == "1.0" else "\n"
-        self._chat.insert("end", sep + text, ("live",))
-        self._chat.configure(state="disabled")
-        self._chat.see("end")
-        self._chat_live = True
-
-    def _clear_live(self):
-        if self._chat_live:
-            self._chat.configure(state="normal")
-            self._chat.delete("live", "end")
-            self._chat.configure(state="disabled")
-            self._chat_live = False
-
-    def _enqueue_chat(self, role: str, text: str):
-        self._chat_queue.append((role, text))
-        if not self._chat_streaming:
-            self._pump_chat()
-
-    def _pump_chat(self):
-        if not self._chat_queue:
-            self._chat_streaming = False
-            return
-        self._chat_streaming = True
-        self._clear_live()                  # a real message replaces any live line
-        role, text = self._chat_queue.pop(0)
-        self._chat.configure(state="normal")
-        if self._chat.index("end-1c") != "1.0":
-            self._chat.insert("end", "\n")
-        if role == "you":
-            self._chat.insert("end", "You said  ", ("you_lbl",))
-        self._chat.configure(state="disabled")
-        self._stream_words(role, text.split(" "), 0)
-
-    def _stream_words(self, role: str, words: list[str], i: int):
-        if i >= len(words):
-            self.after(180, self._pump_chat)        # brief gap, then next message
-            return
-        self._chat.configure(state="normal")
-        chunk = words[i] + (" " if i < len(words) - 1 else "")
-        self._chat.insert("end", chunk, (role,))
-        self._chat.configure(state="disabled")
-        self._chat.see("end")
-        self.after(42, lambda: self._stream_words(role, words, i + 1))
-
-    def _chat_clear(self):
-        self._chat.configure(state="normal")
-        self._chat.delete("1.0", "end")
-        self._chat.configure(state="disabled")
-        self._chat_queue.clear()
-        self._chat_streaming = False
-        self._chat_live = False
+        self._set_status(text, C["FG_BUBBLE"])
 
     # ── global ` (backtick) push-to-talk ───────────────────────────────────────
     def _start_key_listener(self):
@@ -1748,8 +1760,7 @@ class App(tk.Tk):
             return
         self._recording = True
         self._set_indicator("rec")
-        self._set_status("● Listening…", REC)
-        self._chat_status("● Listening… (speak your command)")
+        self._set_status("Listening…", C["FG_BUBBLE"])
         self._poll_meter()
 
     def _stop_and_process(self):
@@ -1761,7 +1772,7 @@ class App(tk.Tk):
         self._draw_meter(0)
         if audio is None:
             self._set_indicator("idle")
-            self._set_status("Too short — hold ` a moment longer", WARN)
+            self._set_status("Too short — hold ` a little longer", WARN)
             if self._always_on:
                 self._start_always_on()
             self._schedule_reset()
@@ -1778,7 +1789,7 @@ class App(tk.Tk):
             return
         self._busy = True
         self._set_indicator("busy")
-        self._set_status("Processing…", ACCENT)
+        self._set_status("Working…", C["FG_BUBBLE"])
         log("PIPELINE", f"=== launching processing thread ({source}) ===")
         threading.Thread(target=self._process, args=(audio,), daemon=True).start()
 
@@ -1799,12 +1810,8 @@ class App(tk.Tk):
         self._reset_after = None
         if self._busy or self._recording:
             return
-        self._set_indicator("idle")
-        self.status_var.set(ALWAYS_ON_MSG if self._always_on else IDLE_MSG)
-        self.status_label.configure(fg=OK if self._always_on else MUTED)
-        self._trial_var.set("")
-        self._clear_live()              # drop any leftover "Listening…/Working…" line
         self._draw_meter(0)
+        self._set_state("idle")
 
     def _process(self, audio):
         trial: dict = {}

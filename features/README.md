@@ -87,7 +87,7 @@ Use `flush=True` so lines appear immediately.
 1. Copy `_template/` to `features/your_feature/`.
 2. Edit `feature.json` (name, description, author).
 3. Replace `main.py` with your code (keep it runnable standalone).
-4. Run the hub (`python ../hub.py`) and click **Rescan features** — your toggle
+4. Run the hub (`python ../hub.py`) — your toggle
    appears. No hub code changes needed.
 
 ---
