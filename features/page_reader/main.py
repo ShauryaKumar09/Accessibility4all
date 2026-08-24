@@ -30,16 +30,18 @@ ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import (console, feature_bus, groq_vision, platform as plat,  # noqa: E402
-                    screen_ocr, settings_store as store, ui_kit as ui)
+from shared import (console, feature_bus, groq_models, groq_vision,  # noqa: E402
+                    platform as plat, pynput_darwin, screen_ocr,
+                    settings_store as store, ui_kit as ui)
 from shared.ui_kit import C  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
+pynput_darwin.install()
 load_dotenv()
 
 SETTINGS_FILE = FEATURE_DIR / "settings.json"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = groq_models.TEXT_MODEL
 GROQ_TIMEOUT = 30
 MAX_ELEMENTS = 120
 DEFAULT_TTS_VOICE = "en-US-AvaMultilingualNeural"
@@ -772,9 +774,10 @@ class PageReaderApp(tk.Tk):
                 {"role": "user", "content": user_msg},
             ],
             temperature=0,
-            max_tokens=128,
+            max_tokens=groq_models.MIN_MAX_TOKENS,
+            **groq_models.TEXT_ARGS,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = groq_models.strip_reasoning(response.choices[0].message.content)
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):

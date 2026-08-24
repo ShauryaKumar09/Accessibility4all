@@ -27,7 +27,8 @@ features/
   "description": "One sentence shown under the toggle.",
   "entry": "main.py",
   "version": "0.1.0",
-  "author": "your name"
+  "author": "your name",
+  "requires_env": ["SOME_API_KEY"]
 }
 ```
 
@@ -38,6 +39,13 @@ features/
 | `entry`       | no\*     | file the hub runs (defaults to `main.py`)            |
 | `version`     | no       | shown as `v0.1.0`                                     |
 | `author`      | no       | shown next to the version                            |
+| `requires_env`| no       | env vars you cannot run without — see below          |
+
+`requires_env` lists environment variables (normally set in the project `.env`)
+that your feature needs to even start. The hub checks them *before* launching:
+if one is missing it leaves the toggle off and says which key to add, instead
+of starting you and letting you die on an exception. Only list keys you need
+unconditionally — if a key gates one optional button, handle that yourself.
 
 \* Optional, but provide them — a missing/invalid manifest falls back to the
 folder name + `main.py`.

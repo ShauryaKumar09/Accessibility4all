@@ -47,16 +47,18 @@ ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import (console, feature_bus, platform as plat, screen_ocr,  # noqa: E402
-                    settings_store as store, ui_kit as ui)
+from shared import (console, feature_bus, groq_models, platform as plat,  # noqa: E402
+                    pynput_darwin, screen_ocr, settings_store as store,
+                    ui_kit as ui)
 from shared.ui_kit import C  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
+pynput_darwin.install()
 load_dotenv()
 
 SETTINGS_FILE = FEATURE_DIR / "settings.json"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = groq_models.TEXT_MODEL
 GROQ_TIMEOUT = 30
 MAX_INPUT_CHARS = 4000
 
@@ -541,9 +543,10 @@ class ToneReaderApp(tk.Tk):
                 {"role": "user", "content": text},
             ],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=max(1024, groq_models.MIN_MAX_TOKENS),
+            **groq_models.TEXT_ARGS,
         )
-        raw = (response.choices[0].message.content or "").strip()
+        raw = groq_models.strip_reasoning(response.choices[0].message.content)
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):

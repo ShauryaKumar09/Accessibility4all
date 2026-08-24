@@ -9,13 +9,13 @@ import re
 from groq import Groq
 from PIL import Image
 
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-# Click localization is now the PRIMARY vision path for voice control. Llama-4
-# Maverick is the stronger localizer, but it is NOT enabled on this Groq account
-# (Scout is the only vision model available), so we use Scout here too. If/when
-# Maverick is enabled, set this to "meta-llama/llama-4-maverick-17b-128e-instruct"
-# and ask_groq_vision will prefer it and fall back to Scout automatically.
-VISION_CLICK_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+from shared.groq_models import (MIN_MAX_TOKENS, VISION_ARGS, VISION_MODEL,
+                                strip_reasoning)
+
+# Click localization is the PRIMARY vision path for voice control. It runs on
+# the same model as page summaries — see shared/groq_models.py for which one
+# and why.
+VISION_CLICK_MODEL = VISION_MODEL
 GROQ_TIMEOUT = 45
 
 PAGE_SUMMARY_PROMPT = """You help a blind user understand a Chrome web page quickly.
@@ -64,10 +64,11 @@ def summarize_page_image(
             ],
         }],
         temperature=0.2,
-        max_tokens=512,
+        max_tokens=MIN_MAX_TOKENS,
         timeout=GROQ_TIMEOUT,
+        **VISION_ARGS,
     )
-    text = (response.choices[0].message.content or "").strip()
+    text = strip_reasoning(response.choices[0].message.content or "")
     text = re.sub(r"\s+", " ", text)
     return text
 
@@ -97,10 +98,11 @@ def answer_page_question(client: Groq, img: Image.Image, question: str) -> str:
             ],
         }],
         temperature=0.2,
-        max_tokens=256,
+        max_tokens=MIN_MAX_TOKENS,
         timeout=GROQ_TIMEOUT,
+        **VISION_ARGS,
     )
-    text = (response.choices[0].message.content or "").strip()
+    text = strip_reasoning(response.choices[0].message.content or "")
     return re.sub(r"\s+", " ", text)
 
 
