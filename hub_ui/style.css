@@ -203,11 +203,32 @@ body {
   margin-bottom: 8px;
 }
 .title-row h1 { margin: 0; }
-.title-controls {
+
+.controls-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 24px 0 8px;
+}
+@media (max-width: 560px) {
+  .controls-grid { grid-template-columns: 1fr; }
+}
+.control-card {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 10px 14px;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.control-card .control-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .chip-btn {
@@ -227,12 +248,6 @@ body {
 .chip-btn.static { cursor: default; opacity: .8; }
 .chip-btn .chip-label { color: var(--fg-muted); font-weight: 400; }
 
-.opt-control {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.opt-control .opt-name { font-size: 15px; font-weight: 600; }
 
 .info-btn {
   width: 18px; height: 18px;
@@ -367,7 +382,11 @@ body {
   margin-top: 24px;
   align-items: start;
 }
-@media (max-width: 900px) {
+/* Threshold accounts for the 260px sidebar + 96px of page padding eating
+   into the window width before .body-split ever sees it — the old 900px
+   value compared against the whole window, so it collapsed to one column
+   even at the app's default/minimum size. */
+@media (max-width: 760px) {
   .body-split { grid-template-columns: 1fr; }
 }
 

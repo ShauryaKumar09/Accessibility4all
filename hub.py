@@ -53,15 +53,15 @@ FEATURE_DATA = {
         "name": "Voice Control",
         "description": "Hold the ` key and tell Chrome what to do.",
         "options": [
-            {"key": "always_on", "label": "Listen without holding the key",
+            {"key": "always_on", "label": "Always on",
              "info": "Keeps listening without holding `. Uses more CPU and "
                      "battery the whole time it's on."},
-            {"key": "dictation_mode", "label": "Type what I say instead of running it",
+            {"key": "dictation_mode", "label": "Dictation mode",
              "info": "Types your speech into whatever's focused, instead of "
                      "treating it as a command for Chrome."},
         ],
         "shortcuts": [
-            {"key": None, "label": "Push-to-talk key", "editable": False, "static": "`"},
+            {"key": None, "label": "Hotkey", "editable": False, "static": "`"},
         ],
         "instructions": [
             ["Hold ` to talk",
@@ -77,19 +77,19 @@ FEATURE_DATA = {
         "name": "Page Reader",
         "description": "Reads what's on your screen out loud.",
         "options": [
-            {"key": "voice_guided", "label": "Let me pick sections by voice",
+            {"key": "voice_guided", "label": "Voice sections",
              "info": "With Voice Control also on, say things like “read "
                      "the billing information” to read just that part."},
-            {"key": "hover_to_read", "label": "Read when I rest the pointer",
+            {"key": "hover_to_read", "label": "Hover to read",
              "info": "Reads whatever line your cursor is resting on, without "
                      "pressing a key."},
-            {"key": "use_groq_summary", "label": "Skip the clutter",
+            {"key": "use_groq_summary", "label": "Skip clutter",
              "info": "Reads a short summary of what matters instead of every "
                      "line on the page."},
         ],
         "shortcuts": [
-            {"key": "read_screen", "label": "Start reading", "editable": True},
-            {"key": "stop", "label": "Stop reading", "editable": True},
+            {"key": "read_screen", "label": "Read", "editable": True},
+            {"key": "stop", "label": "Stop", "editable": True},
         ],
         "instructions": [
             ["Press F9 to read",
@@ -105,12 +105,12 @@ FEATURE_DATA = {
         "name": "Tone & Social Cues",
         "description": "Explains the tone behind a message you highlight.",
         "options": [
-            {"key": "click_to_analyze", "label": "Shift+Click a paragraph in Chrome",
+            {"key": "click_to_analyze", "label": "Shift+Click to analyze",
              "info": "Shift+Click any paragraph on a page to analyze it, "
                      "instead of only working on selected text."},
         ],
         "shortcuts": [
-            {"key": "analyze_selection", "label": "Explain the tone", "editable": True},
+            {"key": "analyze_selection", "label": "Analyze", "editable": True},
         ],
         "instructions": [
             ["Highlight, then press your key",
@@ -125,7 +125,7 @@ FEATURE_DATA = {
         "name": "Dyslexia",
         "description": "Easier fonts for websites, plus a quick reading screen.",
         "options": [
-            {"key": "website_enabled", "label": "Use this font on websites",
+            {"key": "website_enabled", "label": "Website font",
              "info": "Applies your chosen font to pages you visit, via the "
                      "bundled Chrome extension."},
         ],
@@ -144,7 +144,7 @@ FEATURE_DATA = {
         "name": "Color Blind Filter",
         "description": "Makes colors on your screen easier to tell apart.",
         "options": [
-            {"key": "enabled", "label": "Turn the filter on",
+            {"key": "enabled", "label": "Filter on",
              "info": "Applies right away. If the screen doesn't change, try "
                      "locking and unlocking (Win+L)."},
         ],
@@ -160,7 +160,7 @@ FEATURE_DATA = {
         "name": "Focus Mode",
         "description": "Blocks distracting sites for a set amount of time.",
         "options": [
-            {"key": "active", "label": "Blocking now",
+            {"key": "active", "label": "Blocking",
              "info": "Blocks the sites below, system-wide, until the timer "
                      "runs out or you turn this off."},
         ],
@@ -513,7 +513,7 @@ def main():
         "Accessibility4all",
         str(UI_DIR / "index.html"),
         js_api=api,
-        width=1100, height=760, min_size=(820, 560),
+        width=1180, height=780, min_size=(920, 580),
         background_color="#14161b",
     )
     window.events.closed += api.shutdown

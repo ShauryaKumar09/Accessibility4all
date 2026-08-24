@@ -114,14 +114,14 @@ async function renderFeaturePage(main, feat) {
   main.innerHTML = `
     <div class="title-row">
       <h1 class="page-title" style="margin-bottom:0">${escapeHtml(feat.name)}</h1>
-      <div class="title-controls" id="title-controls"></div>
     </div>
     <p class="page-sub">${escapeHtml(feat.description)}</p>
-    <div id="settings-panel-host"></div>
     <div class="body-split">
       <div class="steps" id="steps-col"></div>
       <div class="placeholder-panel">Preview coming soon</div>
     </div>
+    <div class="controls-grid" id="title-controls"></div>
+    <div id="settings-panel-host"></div>
   `;
 
   renderTitleControls(feat, settings, on);
@@ -141,32 +141,39 @@ function renderTitleControls(feat, settings, on) {
   host.innerHTML = "";
 
   for (const sc of feat.shortcuts) {
-    const chip = document.createElement("div");
-    chip.className = "chip-btn" + (sc.editable ? "" : " static");
+    const card = document.createElement("div");
+    card.className = "control-card" + (sc.editable ? "" : " static");
     const current = sc.editable ? (settings.hotkeys || {})[sc.key] || "" : (sc.static || "");
-    chip.innerHTML = `<span class="chip-label">${escapeHtml(sc.label)}</span><span>${escapeHtml(current || "—")}</span>`;
-    if (sc.editable) chip.addEventListener("click", () => openHotkeyModal(feat, sc, settings));
-    host.appendChild(chip);
+    card.innerHTML = `
+      <span class="control-name">${escapeHtml(sc.label)}</span>
+      <span class="chip-btn${sc.editable ? "" : " static"}">${escapeHtml(current || "—")}</span>
+    `;
+    if (sc.editable) card.querySelector(".chip-btn").addEventListener(
+      "click", () => openHotkeyModal(feat, sc, settings));
+    host.appendChild(card);
   }
 
   for (const opt of feat.options) {
-    const wrap = document.createElement("div");
-    wrap.className = "opt-control";
+    const card = document.createElement("div");
+    card.className = "control-card";
     const optOn = !!settings[opt.key];
-    wrap.innerHTML = `
-      <button class="info-btn" title="What's this?">i</button>
-      <span class="opt-name">${escapeHtml(opt.label)}</span>
+    card.innerHTML = `
+      <span class="control-name">
+        <button class="info-btn" title="What's this?">i</button>
+        ${escapeHtml(opt.label)}
+      </span>
       <span class="switch ${optOn ? "on" : ""}"><span class="knob"></span></span>
     `;
-    wrap.querySelector(".info-btn").addEventListener("click", () => openInfoModal(opt.label, opt.info));
-    const sw = wrap.querySelector(".switch");
+    card.querySelector(".info-btn").addEventListener(
+      "click", (e) => { e.stopPropagation(); openInfoModal(opt.label, opt.info); });
+    const sw = card.querySelector(".switch");
     sw.addEventListener("click", async () => {
       const next = !sw.classList.contains("on");
       sw.classList.toggle("on", next);
       settings[opt.key] = next;
       await api().save_setting(feat.id, opt.key, next);
     });
-    host.appendChild(wrap);
+    host.appendChild(card);
   }
 }
 
