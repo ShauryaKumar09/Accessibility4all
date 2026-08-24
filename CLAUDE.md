@@ -75,6 +75,7 @@ features/
 └── voice_control/      ← the first real feature (voice → Chrome control)
     ├── feature.json    ← manifest (name, description, entry, version, author)
     ├── settings.json   ← this feature's settings; the HUB writes them
+    ├── bubble.py       ← the floating compact bar (a transparent web view)
     └── main.py         ← runnable entry point
 ```
 
@@ -97,12 +98,14 @@ process** (`subprocess.Popen([python, entry], cwd=feature_dir)`):
 
 This process-per-feature model is deliberate: it lets separate developers own
 separate folders without merge conflicts, and it's required because GUI features
-(like voice control) each need their own tkinter main loop.
+(like voice control) each need their own GUI main loop.
 
 ### Where the UI lives (two toolkits, deliberately)
 
 The split is: **the hub is a pywebview (HTML/CSS/JS) app shell; a running
-feature draws its own tkinter bubble with live state only.**
+feature draws its own small bubble with live state only.** A bubble is
+tkinter by default; Voice Control's floating bar is pywebview because the
+design needs a genuinely transparent window (see below).
 
 - **Hub window** (`hub.py` + `hub_ui/index.html` + `app.js` + `style.css`) —
   a pywebview window, not tkinter. `hub.py`'s `Api` class is the only bridge
@@ -118,30 +121,41 @@ feature draws its own tkinter bubble with live state only.**
   body: numbered clickable instructions on the left, a placeholder panel on
   the right reserved for a future preview. `hub_ui/style.css`'s CSS custom
   properties mirror `shared/ui_kit.py`'s `C` dict 1:1 so the hub and the
-  still-tkinter bubbles read as one product. This is why `pywebview` and
+  bubbles read as one product. This is why `pywebview` and
   (on macOS) extra `pyobjc-framework-Cocoa`/`pyobjc-framework-WebKit` are in
   requirements.txt.
 - **Feature bubbles** — each running feature is still its own OS process
-  drawing one small borderless always-on-top tkinter window with live state
-  only: no settings, no shortcut rows, no instructions. Everything is drawn
-  on a `tk.Canvas` using `shared/ui_kit.py` (tokens `C`, `FontSet`,
-  `rounded_rect`, `pill`, `draw_switch`, `TapCanvas`, `TextButton`,
-  `CircleButton`, `progress_bar`). Follow that pattern for a bubble rather
-  than introducing ttk themes or a third toolkit — the two-toolkit split is
-  hub vs. bubbles, not "anything goes." Minimum target size is 48px, body
-  copy never below 17px, and every interactive element keeps a 2px
+  drawing one small borderless always-on-top window with live state only: no
+  settings, no shortcut rows, no instructions. Most are a `tk.Canvas` drawn
+  with `shared/ui_kit.py` (tokens `C`, `FontSet`, `rounded_rect`, `pill`,
+  `draw_switch`, `TapCanvas`, `TextButton`, `CircleButton`, `progress_bar`).
+  Follow that pattern rather than introducing ttk themes or a third toolkit —
+  the split is hub vs. bubbles, not "anything goes." Minimum target size is
+  48px, body copy never below 17px, and every interactive element keeps a 2px
   `#6f9bff` focus ring.
+- **Voice Control's compact bar is the exception**
+  (`features/voice_control/bubble.py`) — a frameless, transparent pywebview
+  window instead of a canvas. The design calls for a pill that *floats*:
+  rounded ends, a drop shadow, nothing boxy behind it. tkinter on macOS
+  cannot do that — `wm attributes -transparent` is accepted and then paints
+  the window solid black (checked on Tk 9.0.3), so the pill always sat inside
+  a visible rectangle. As HTML the shape is `border-radius: 999px`, the
+  waveform is CSS keyframes running on the compositor, and every state change
+  is a CSS transition, so there is no Python frame loop at all. Python only
+  pushes state in (`Bar.set_state`, `Bar.set_level`). Its CSS custom
+  properties are generated from `shared/ui_kit.py`'s `C` dict, so it stays in
+  step with the hub and the tkinter bubbles.
 - Settings themselves still live in `features/<id>/settings.json` via
   `shared/settings_store.py`; the running feature notices a hub-made edit
   through `settings_store.Watcher` (polled ~700ms) and re-applies without a
   restart — unchanged by the pywebview move, since that file format was
   always UI-agnostic.
 
-Two tkinter limits the bubbles work around: there is no translucency (rgba
-values are pre-blended to solid fills, and a "fading" ring fades its colour
-toward the surface with `ui.fade`), and there is no CSS animation (width and
-waveform animation are `after()` frame loops). The hub itself doesn't have
-either limit — it's a real web page.
+Two tkinter limits the canvas bubbles work around: there is no translucency
+(rgba values are pre-blended to solid fills, and a "fading" ring fades its
+colour toward the surface with `ui.fade`), and there is no CSS animation
+(motion is an `after()` frame loop). The hub and the Voice Control bar don't
+have either limit — they're real web pages.
 
 ---
 
@@ -268,12 +282,21 @@ Every run logs each step to the terminal with timings, and appends a JSON line t
   actually shown. An out-of-range / `-1` index raises a clear "no match" error
   instead of clicking somewhere random.
 
-### tkinter thread-safety (critical)
+### Threading (critical)
 
-tkinter is **not** thread-safe; calling a widget from a non-main thread segfaults
-on macOS. The audio callback runs on PortAudio's thread and must only append
-frames + store a float `level`. Worker threads update the UI only via
-`_set_status` / `_set_trial_info`, which wrap everything in `self.after(0, ...)`.
+The audio callback runs on PortAudio's thread and must only append frames +
+store a float `level` — never touch anything else. Worker threads narrate
+through `_set_status` / `_set_trial_info`, which push a closure onto `_ui_q`;
+`_drain_ui` runs it.
+
+Everything that used to be `self.after(...)` on a Tk main loop now runs on
+`bubble.Scheduler` — one daemon thread executing timers in order, so the poll
+loops (`_poll_keys`, `_poll_meter`, `_drain_ui`) and the idle-reset timer keep
+their single-threaded guarantees. `App.after` / `App.after_cancel` are the same
+call sites as before; only the loop underneath changed. The bar itself is safe
+to update from any thread — `Bar.set_state` / `Bar.set_level` hand one
+`evaluate_js` call (~1ms) to pywebview, which marshals it onto its own UI
+thread.
 
 ### Audio backend
 

@@ -5,7 +5,6 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*audioo
 
 import os
 import re
-import math
 import sys
 import json
 import time
@@ -22,7 +21,6 @@ import pyautogui
 from PIL import ImageDraw
 import speech_recognition as sr
 import pytesseract
-import tkinter as tk
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -33,12 +31,16 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import (console, feature_bus, platform as plat, screen_ocr,  # noqa: E402
-                    groq_vision, settings_store as store, ui_kit as ui)
+from shared import (console, feature_bus, groq_models, platform as plat,  # noqa: E402
+                    pynput_darwin, screen_ocr, groq_vision,
+                    settings_store as store)
 from shared.ui_kit import C  # noqa: E402
+
+import bubble  # noqa: E402  (this feature's floating bar; see bubble.py)
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
+pynput_darwin.install()
 
 # ── Trial logging ─────────────────────────────────────────────────────────────
 TRIAL_LOG = Path(__file__).parent / "trials.jsonl"
@@ -102,7 +104,7 @@ class Timer:
         return False  # never suppress the exception
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = groq_models.TEXT_MODEL
 STT_TIMEOUT = 15          # seconds — max wait for Google speech-to-text
 GROQ_TIMEOUT = 30         # seconds — max wait for the Groq API call
 
@@ -696,9 +698,10 @@ def ask_groq(client: Groq, command: str, elements: list[dict]) -> dict:
                 {"role": "user", "content": user_message},
             ],
             temperature=0,
-            max_tokens=128,
+            max_tokens=groq_models.MIN_MAX_TOKENS,
+            **groq_models.TEXT_ARGS,
         )
-    raw = response.choices[0].message.content.strip()
+    raw = groq_models.strip_reasoning(response.choices[0].message.content)
     log("GROQ", f"raw response: {raw!r}")
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -1092,20 +1095,64 @@ def detect_slash_search_site(elements: list[dict]) -> bool:
 # (e.g. Amazon's bar) rather than always hitting Google in the address bar. Most
 # sites render readable placeholder text ("Search", "Search Amazon").
 _SEARCH_BOX_BAD = re.compile(r"(?i)\b(results?|history|settings?|suggestions?)\b")
+# A magnifying-glass icon has no letters, so OCR renders it as whatever it
+# resembles — "| Q Search Wikipedia", "=Q Search", "© Search". Strip that lead-in
+# before judging the text, or the real field never looks like it starts with
+# "search" and loses to the submit button beside it.
+_GLASS_NOISE = re.compile(r"^[\W_]+|^[qo©=]\s+", re.I)
+# Below this a lone "Search" is the submit BUTTON next to the field, not the
+# field. Clicking it with an empty box does nothing at all.
+_BUTTON_MAX_W = 120
+# How far down the window a search bar can plausibly sit. Used to reject a
+# vision model's coordinate when it has clearly guessed.
+SEARCH_BOX_MAX_DEPTH = 0.45
+# An empty input holds a short placeholder at most. A nav strip or a banner —
+# the things most likely to be mistaken for one, since they are also wide, flat
+# rectangles — is full of words. Counting the OCR that falls inside a candidate
+# separates the two without another model call.
+_FIELD_MAX_TEXT_CHARS = 30
+
+
+def _box_is_empty(box: tuple[int, int, int, int], elements: list[dict]) -> bool:
+    """True when little enough OCR text sits inside `box` for it to be an input."""
+    x0, y0, x1, y1 = box
+    chars = 0.0
+    for el in elements:
+        ex0, ey0 = el.get("x0", 0), el.get("y0", 0)
+        ex1, ey1 = el.get("x1", 0), el.get("y1", 0)
+        # OCR merges a whole nav strip into one wide element whose centre can
+        # fall outside a candidate it still covers, so measure the overlap and
+        # charge the box for the share of the text sitting on it
+        ow = min(x1, ex1) - max(x0, ex0)
+        oh = min(y1, ey1) - max(y0, ey0)
+        if ow <= 0 or oh <= 0:
+            continue
+        width = max(1, ex1 - ex0)
+        chars += len((el.get("text") or "").strip()) * (ow / width)
+    return chars <= _FIELD_MAX_TEXT_CHARS
+
+
+def _search_text(raw: str) -> str:
+    """Strip OCR's rendering of the search icon from the front of a label."""
+    text = raw.strip()
+    for _ in range(2):                      # "| Q Search" needs two passes
+        text = _GLASS_NOISE.sub("", text, count=1).strip()
+    return text
+
 
 def find_search_box(elements: list[dict]) -> dict | None:
     """Best on-page search field from OCR placeholder text, or None.
 
-    Prefers a short 'Search' / 'Search <site>' placeholder in the upper part of
-    the page (where search bars live) and returns the element to click to focus
-    it. Returns None when nothing looks like a search box (e.g. a blank tab), so
-    the caller can fall back to a Google search in the address bar."""
+    Prefers a 'Search <site>' placeholder in the upper part of the page (where
+    search bars live) and returns the element to click to focus it. Returns None
+    when nothing looks like a search box (e.g. a blank tab), so the caller can
+    fall back to a Google search in the address bar."""
     screen_w, screen_h = pyautogui.size()
     best, best_score = None, -1.0
     for el in elements:
-        t = (el.get("text") or "").strip()
-        low = t.lower()
-        if "search" not in low or len(t) > 40:
+        text = _search_text(el.get("text") or "")
+        low = text.lower()
+        if "search" not in low or len(text) > 40:
             continue
         if _SEARCH_BOX_BAD.search(low):     # "search results", "search history", …
             continue
@@ -1113,13 +1160,21 @@ def find_search_box(elements: list[dict]) -> dict | None:
         if y > screen_h * 0.55:             # search bars sit up top, not mid-page
             continue
         width = el.get("x1", 0) - el.get("x0", 0)
-        if low == "search":
-            score = 40.0
-        elif low.startswith("search ") and len(low) <= 24:
-            score = 55.0                    # "Search Amazon", "Search amazon.com"
+        words = low.split()
+        if low == "search" and width < _BUTTON_MAX_W:
+            score = 5.0                     # the button, not the box
+        elif len(words) > 6:
+            score = 5.0                     # a merged nav strip that happens to
+                                            # contain the word, not a field
+        elif low.startswith("search") and len(words) > 1:
+            score = 60.0                    # "Search Amazon", "Search Wikipedia"
+        elif low == "search":
+            score = 35.0                    # a wide bare "Search" can be the box
         else:
-            score = 10.0
-        score += min(width, 420) / 20       # wider boxes are more likely the field
+            score = 25.0                    # e.g. GitHub's "Type / to search"
+        # width carries real weight: a search field is one of the widest things
+        # on the row, a submit button one of the narrowest
+        score += min(width, 420) / 8
         score -= (y / max(1, screen_h)) * 25  # nearer the top is better
         if score > best_score:
             best, best_score = el, score
@@ -1194,9 +1249,10 @@ def ask_groq_vision(client: Groq, command: str, elements: list[dict]) -> dict:
                         {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": data_url}},
                     ]}],
-                    temperature=0, max_tokens=60, timeout=GROQ_TIMEOUT,
+                    temperature=0, max_tokens=groq_models.MIN_MAX_TOKENS,
+                    timeout=GROQ_TIMEOUT, **groq_vision.VISION_ARGS,
                 )
-            raw = (response.choices[0].message.content or "").strip()
+            raw = groq_models.strip_reasoning(response.choices[0].message.content)
             if raw:
                 break
         except Exception as e:
@@ -1318,36 +1374,30 @@ def execute_action(action: dict) -> str:
     else:
         return f"Unknown action: {kind}"
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-# A desktop bubble: a mic dot at rest, widening while you talk, then one line
-# saying what happened. The transcript, meter, "Always on" checkbox and the
-# "hold ` to talk" hint all moved out — Always on into the hub's settings sheet,
-# the instructions into the hub's walkthrough.
+# ── UI ───────────────────────────────────────────────────────────────────────────
+# The bubble is the design's compact bar: a mic circle, a waveform, and one
+# line of live state, floating over whatever app you are using. Its shape and
+# motion live in bubble.py — an HTML window, because tkinter on macOS cannot
+# draw a pill with nothing boxy behind it (see that file's header).
 TEXT = C["FG_BUBBLE"]; MUTED = C["FG_MUTED"]
 ACCENT = C["ACCENT"]; REC = C["STOP_BORDER"]; OK = C["ON"]; WARN = C["WARM_TEXT"]
-IDLE_MSG = "Ready"
+IDLE_MSG = "Hold ` to talk"
 ALWAYS_ON_MSG = "Listening for a command"
 
-BUBBLE_H = 60
-DOT_D = 40                 # the mic circle
-PAD_L = 10
-PAD_R = 22                 # right padding once expanded
-GAP = 14
-WAVE_BARS, WAVE_BAR_W, WAVE_GAP, WAVE_H = 9, 4, 4, 26
-WAVE_W = WAVE_BARS * WAVE_BAR_W + (WAVE_BARS - 1) * WAVE_GAP
-COLLAPSED_W = PAD_L * 2 + DOT_D            # 60px — just the dot
-LISTENING_W = 256                          # the design's expanded width
-MAX_W = 360                                # result lines get a little more room
-EXPAND_MS = 180                            # width animation
-FRAME_MS = 33
 SETTINGS_WATCH_MS = 700
-WIN_W, WIN_H = COLLAPSED_W, BUBBLE_H       # presence starts at the resting size
+LEVEL_FULL_SCALE = 1500.0  # mic RMS that reads as a full-height waveform
 TALK_KEYCODE = 50          # macOS keycode for the ` / ~ key (kVK_ANSI_Grave)
 
 
-class App(tk.Tk):
+class App:
+    """The feature: the floating bar plus everything behind it.
+
+    There is no tkinter main loop any more. `bubble.Scheduler` provides the
+    `after()` / `after_cancel()` the poll loops and timers below still use, and
+    runs every callback on one thread so their single-threaded assumptions hold.
+    """
+
     def __init__(self):
-        super().__init__()
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise RuntimeError("GROQ_API_KEY not found in environment / .env file")
@@ -1367,178 +1417,61 @@ class App(tk.Tk):
         # "that's wrong, go back"). Captured before each acting command.
         self._undo_target: dict | None = None
         self._watcher = store.Watcher("voice_control")
-        # Worker threads must NOT touch tkinter (and `after()` from a non-main
-        # thread is dropped on macOS). They push UI updates onto this queue; the
-        # main thread drains it in _drain_ui. This is what makes the live
-        # narration actually appear instead of freezing on "Processing…".
+        # Worker threads never touch the bar directly. They push UI updates onto
+        # this queue; _drain_ui runs them on the scheduler thread, in order.
         self._ui_q: queue.Queue = queue.Queue()
-        self._build_ui()
-        self._reset_idle()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._state = "idle"
+        self._text = IDLE_MSG
+        self._text_color = C["FG_BUBBLE"]
+        self._level = 0.0
+        self._sched = bubble.Scheduler(
+            on_error=lambda e: log("UI", f"scheduled task failed: {e}", "ERROR"))
+        # The mic circle reports press/release through the same queue as the
+        # global ` key, so both paths are serialised by _poll_keys.
+        self.bar = bubble.Bar(self._key_q, pyautogui.size(),
+                              on_closed=self._on_close)
+
+    # ── lifecycle ──
+    def run(self):
+        """Show the bar and block until it closes."""
+        self.bar.run(self._on_started)
+
+    def _on_started(self):
+        """Runs once the bar is on screen (on a pywebview worker thread)."""
+        log("STARTUP", "UI ready — hold the ` key or the mic circle to talk")
         hint = plat.permission_hints("voice_control")
         if hint:
             log("STARTUP", hint)
+        self._set_state("idle")
         self._drain_ui()
         self._start_key_listener()
+        self._update_presence()
+        self.after(SETTINGS_WATCH_MS, self._watch_settings)
         if self._always_on:
             self.after(200, self._start_always_on)
 
     def _on_close(self):
         self._stop_always_on()
+        self._sched.stop()
         feature_bus.remove_presence("voice_control")
-        self.destroy()
 
-    def _build_ui(self):
-        """The bubble: a mic dot that widens while you talk.
+    # ── timers (what tkinter's after() used to give us) ──
+    def after(self, ms: float, fn) -> int:
+        return self._sched.after(ms, fn)
 
-        Resting it is a 60px circle; listening it grows to 256px with a pulsing
-        ring, a waveform driven by the real mic level, and the word Listening…;
-        when a command finishes it shows one line of what happened and shrinks
-        back on its own.
-        """
-        self.title("Accessibility4all")
-        self.resizable(False, False)
-        self.fonts = ui.FontSet(1.0)
+    def after_cancel(self, tid):
+        self._sched.after_cancel(tid)
 
-        self._state = "idle"              # idle | listening | working | done
-        self._text = ""
-        self._text_color = C["FG_BUBBLE"]
-        self._width = COLLAPSED_W
-        self._target_w = COLLAPSED_W
-        self._level = 0.0                 # mic energy, drives the waveform
-        self._phase = 0.0                 # waveform animation clock
-        self._pulse = 0.0                 # 0..1 ring expansion
-        self._animating = False
-
-        self._transparent = ui.make_bubble(self, MAX_W, BUBBLE_H)
-        self.canvas = ui.bubble_canvas(self, MAX_W, BUBBLE_H, self._transparent)
-        self.canvas.pack(fill="both", expand=True)
-
-        # the dot doubles as the click-and-hold fallback for the ` key
-        self.mic_btn = ui.CircleButton(
-            self.canvas, DOT_D, "mic", command=None, fill=C["DOT_IDLE"],
-            border=None, glyph=C["DOT_IDLE_FG"], takefocus=0)
-        self.mic_btn.bind("<ButtonPress-1>", lambda e: self._start_recording())
-        self.mic_btn.bind("<ButtonRelease-1>", lambda e: self._stop_and_process())
-        self.canvas.create_window(PAD_L, BUBBLE_H / 2, window=self.mic_btn,
-                                  anchor="w", tags="dot")
-
-        self._apply_geometry()
-        self._draw_bubble()
-        self.after(120, lambda: ui.raise_bubble(self))
-        self.after(100, self._update_presence)
-        self.after(SETTINGS_WATCH_MS, self._watch_settings)
-
-    # ── bubble drawing + animation ──
-    def _bubble_position(self) -> tuple[int, int]:
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        return max(0, (sw - int(self._width)) // 2), sh - BUBBLE_H - 80
-
-    def _apply_geometry(self):
-        x, y = self._bubble_position()
-        self.geometry(f"{int(self._width)}x{BUBBLE_H}+{x}+{y}")
-        self.canvas.configure(width=int(self._width))
-
+    # ── the bar's one line of state ──
     def _set_state(self, state: str, text: str = "", color: str | None = None):
-        """Move the bubble between idle / listening / working / done."""
+        """Move the bar between idle / listening / working / done."""
         self._state = state
-        self._text = text
+        self._text = text or (IDLE_MSG if state == "idle" else self._text)
         self._text_color = color or C["FG_BUBBLE"]
-        if state == "idle":
-            self._target_w = COLLAPSED_W
-        elif state == "listening":
-            self._target_w = LISTENING_W
-        else:
-            needed = (PAD_L + DOT_D + GAP
-                      + self.fonts["ui"].measure(text or "") + PAD_R)
-            self._target_w = max(COLLAPSED_W, min(MAX_W, needed))
-        self._start_animation()
-
-    def _start_animation(self):
-        if not self._animating:
-            self._animating = True
-            self.after(FRAME_MS, self._animate)
-
-    def _animate(self):
-        step = (LISTENING_W - COLLAPSED_W) * FRAME_MS / EXPAND_MS
-        moving = abs(self._width - self._target_w) > 1
-        if moving:
-            direction = 1 if self._target_w > self._width else -1
-            self._width += direction * min(step, abs(self._target_w - self._width))
-            self._apply_geometry()
-        elif self._width != self._target_w:
-            self._width = self._target_w
-            self._apply_geometry()
-
-        if self._state == "listening":
-            self._phase += FRAME_MS / 1000.0
-            self._pulse = (self._pulse + FRAME_MS / 1600.0) % 1.0
-        self._draw_bubble()
-
-        if moving or self._state == "listening":
-            self.after(FRAME_MS, self._animate)
-        else:
-            self._animating = False
-
-    def _dot_colors(self) -> tuple[str, str]:
-        if self._state == "listening":
-            return C["ACCENT_FILL"], C["ACCENT_ON"]
-        if self._state == "done":
-            return C["DOT_DONE"], C["DOT_DONE_FG"]
-        if self._state == "working":
-            return C["ACCENT_FILL"], C["ACCENT_ON"]
-        return C["DOT_IDLE"], C["DOT_IDLE_FG"]
-
-    def _draw_bubble(self):
-        w = int(self._width)
-        self.canvas.delete("bubble")
-        border = C["ACCENT"] if self._state == "listening" else C["BORDER_CTRL"]
-        ui.pill(self.canvas, 1, 1, w - 1, BUBBLE_H - 1, fill=C["BUBBLE"],
-                outline=border, width=1, tags="bubble")
-        self.canvas.tag_lower("bubble")
-
-        fill, glyph = self._dot_colors()
-        self.mic_btn.set_style(fill=fill, glyph=glyph)
-
-        cx, cy = PAD_L + DOT_D / 2, BUBBLE_H / 2
-        if self._state == "listening":
-            # the design's pulsing ring: expands 1 -> 1.6 while fading out, and
-            # tkinter has no alpha, so the colour fades toward the bubble fill
-            scale = 1.0 + 0.6 * self._pulse
-            r = DOT_D / 2 * scale
-            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="",
-                                    outline=ui.fade(C["ACCENT"], C["BUBBLE"],
-                                                  self._pulse),
-                                    width=2, tags="bubble")
-
-        x = PAD_L + DOT_D + GAP
-        if self._state == "listening" and w > COLLAPSED_W + 40:
-            level = max(0.15, min(1.0, self._level / 2500.0))
-            for i in range(WAVE_BARS):
-                amp = 0.2 + 0.8 * level * (
-                    0.5 + 0.5 * math.sin(self._phase * 6.0 + i * 0.7))
-                bar_h = max(4, WAVE_H * amp)
-                bx = x + i * (WAVE_BAR_W + WAVE_GAP)
-                self.canvas.create_rectangle(
-                    bx, cy - bar_h / 2, bx + WAVE_BAR_W, cy + bar_h / 2,
-                    fill=C["WAVE"], outline="", tags="bubble")
-            x += WAVE_W + GAP
-
-        if self._text and w > COLLAPSED_W + 20:
-            avail = w - x - PAD_R
-            if avail > 20:
-                self.canvas.create_text(
-                    x, cy, anchor="w", font=self.fonts["ui"],
-                    text=ui.ellipsize(self.fonts["ui"], self._text, avail),
-                    fill=self._text_color, tags="bubble")
+        self.bar.set_state(state, self._text, self._text_color)
 
     def _update_presence(self):
-        x, y = self._bubble_position()
-        feature_bus.update_presence(
-            "voice_control",
-            os.getpid(),
-            {"x": x, "y": y, "w": int(self._width), "h": BUBBLE_H},
-        )
+        feature_bus.update_presence("voice_control", os.getpid(), self.bar.rect())
 
     # ── settings (edited in the hub) ──
     def _watch_settings(self):
@@ -1594,8 +1527,15 @@ class App(tk.Tk):
 
     # ── mic level (polled on the main thread; never read from the audio thread) ──
     def _draw_meter(self, energy: float):
-        """The old audio meter now drives the bubble's waveform height."""
+        """The mic meter drives the waveform's height on the bar.
+
+        RMS is linear but hearing isn't: mapping it straight through left the
+        bars barely twitching at normal speaking volume. The square root pulls
+        ordinary speech up into the top half of the range, where the waveform
+        actually reads as someone talking.
+        """
         self._level = energy
+        self.bar.set_level(min(1.0, energy / LEVEL_FULL_SCALE) ** 0.5)
 
     def _poll_meter(self):
         if not self._recording:
@@ -2078,18 +2018,55 @@ class App(tk.Tk):
                           _type(query, enter=True))
             return action, "site-search", ecount, f"search this page for {query!r}"
 
-        # 2) OCR found no labelled box — the field is often empty, its placeholder
-        #    is faint, or it's just a magnifying-glass icon (true on Amazon). Let
-        #    the vision model SEE the page and point at the search box.
+        # 2) OCR found no readable placeholder. Look for the field by SHAPE — a
+        #    wide, evenly filled, bounded rectangle near the top of the page.
+        #    This is what catches Amazon, whose placeholder says "Ask Alexa a
+        #    question" and never contains the word "search" at all.
+        bounds = plat.get_chrome_window_bounds(log_fn=log)
+        if bounds:
+            ox, oy, rw, rh = screen_ocr._below_chrome_ui(bounds)
+            page = pyautogui.screenshot(region=(ox, oy, rw, rh))
+            sx = rw / page.width if page.width else 1.0
+            sy = rh / page.height if page.height else 1.0
+            found = screen_ocr.find_input_field(page)
+            if found:
+                fx0, fy0, fx1, fy1 = found
+                box = (int(ox + fx0 * sx), int(oy + fy0 * sy),
+                       int(ox + fx1 * sx), int(oy + fy1 * sy))
+                if _box_is_empty(box, elements):
+                    x, y = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+                    log("RESOLVE", f"search field located by shape at ({x}, {y})")
+                    action = _seq({"action": "click", "x": x, "y": y},
+                                  _type(query, enter=True))
+                    return (action, "site-search-shape", ecount,
+                            f"search this page for {query!r}")
+                log("RESOLVE", "shape candidate holds page text — not an input")
+
+        # 3) Nothing readable and nothing field-shaped. Let the vision model SEE
+        #    the page and point at the search box.
         try:
             self._set_status(f"{label}Looking for the search box with AI…", ACCENT)
             click = ask_groq_vision(
                 self.groq,
-                "the main search box / search bar on this page — the empty field "
-                "where you type a query to search this site, usually near the top "
-                "next to a magnifying-glass icon",
+                "the main search INPUT FIELD on this page — the wide empty box a "
+                "query gets typed into, usually near the top beside a "
+                "magnifying-glass icon. Point at the middle of the empty box "
+                "itself. Do NOT pick the 'Search' submit button, a magnifying-glass "
+                "icon on its own, or a 'search results' heading: clicking those "
+                "with an empty field does nothing. If the field is a plain empty "
+                "rectangle with no text in it, use the point form",
                 elements)
             x, y = int(click["x"]), int(click["y"])
+            # The model answers with a coordinate whether or not it found
+            # anything, and a confident wrong answer clicks some unrelated part
+            # of the page. A search bar is near the top of the window; anything
+            # lower is a miss, and a web search beats a random click.
+            if bounds:
+                wx, wy, ww, wh = bounds
+                if y > wy + wh * SEARCH_BOX_MAX_DEPTH:
+                    raise RuntimeError(
+                        f"vision pointed at ({x}, {y}), too low on the page to be "
+                        "a search bar")
             log("RESOLVE", f"vision located the search box at ({x}, {y})")
             action = _seq({"action": "click", "x": x, "y": y},
                           _type(query, enter=True))
@@ -2097,7 +2074,7 @@ class App(tk.Tk):
         except Exception as e:
             log("RESOLVE", f"vision couldn't find a search box ({e}) → using Google")
 
-        # 3) Nothing on the page looks like a search box (e.g. a blank tab).
+        # 4) Nothing on the page looks like a search box (e.g. a blank tab).
         action = _seq(plat.hotkey_action("mod", "l"), _type(query, enter=True))
         return action, "site-search-web", ecount, f"search the web for {query!r}"
 
@@ -2230,7 +2207,6 @@ if __name__ == "__main__":
     except Exception as e:
         log("STARTUP", f"failed to start: {type(e).__name__}: {e}", "ERROR")
         raise
-    log("STARTUP", "UI ready — hold the ` key or ● dot to talk")
-    app.mainloop()
+    app.run()
     feature_bus.remove_presence("voice_control")
-    log("SHUTDOWN", "main loop exited")
+    log("SHUTDOWN", "bar closed")
