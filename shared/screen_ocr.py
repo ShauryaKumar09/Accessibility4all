@@ -216,22 +216,47 @@ def expand_to_paragraph(elements: list[dict], seed: dict) -> dict:
     return merged[0] if merged else seed
 
 
+# Chrome's own tab strip + toolbar/URL bar (not page content) sit in a fixed
+# band at the top of every window, packed with small icons — favicons, tab
+# close buttons, extension icons. Tesseract reads those as garbled 1-3 char
+# tokens at moderate confidence (~44-80), not low enough to be caught by the
+# normal conf<40 cutoff, and merge_line_elements/merge_paragraph_elements can
+# then stitch that noise into nonsense lines that leak into whatever reads
+# OCR'd Chrome text (page_reader, voice_control's click targeting,
+# tone_reader's Shift+Click). None of those features want the browser's own UI
+# anyway, so crop it out before OCR ever sees it. This is an approximation
+# (tuned for Chrome's default theme/zoom at 100% display scale) — a few px
+# of page content may get clipped at some zoom levels, which is a much
+# smaller cost than reading garbage as if it were page text.
+_CHROME_CHROME_PX = 116
+
+
+def _below_chrome_ui(bounds: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    left, top, width, height = bounds
+    crop = min(_CHROME_CHROME_PX, max(0, height - 50))
+    return left, top + crop, width, max(1, height - crop)
+
+
 def capture_chrome_screenshot() -> Image.Image:
-    """Screenshot the front Chrome window only."""
+    """Screenshot the front Chrome window's page area (tabs/toolbar excluded)."""
     from PIL import Image
 
     plat.activate_chrome()
     bounds = plat.get_chrome_window_bounds()
+    if bounds:
+        bounds = _below_chrome_ui(bounds)
     shot = pyautogui.screenshot(region=bounds) if bounds else pyautogui.screenshot()
     return shot
 
 
 def capture_chrome_elements(log_fn: LogFn | None = None) -> list[dict]:
-    """Focus Chrome and OCR only the front Chrome window."""
+    """Focus Chrome and OCR only its page area (tabs/toolbar excluded — see
+    `_below_chrome_ui`, they're not page content and Tesseract reads their
+    icons as garbled text)."""
     plat.activate_chrome(log_fn=log_fn)
     bounds = plat.get_chrome_window_bounds(log_fn=log_fn)
     if bounds:
-        return capture_screen_elements(log_fn=log_fn, region=bounds)
+        return capture_screen_elements(log_fn=log_fn, region=_below_chrome_ui(bounds))
     return capture_screen_elements(log_fn=log_fn)
 
 
