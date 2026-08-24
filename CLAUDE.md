@@ -99,38 +99,49 @@ This process-per-feature model is deliberate: it lets separate developers own
 separate folders without merge conflicts, and it's required because GUI features
 (like voice control) each need their own tkinter main loop.
 
-### Where the UI lives (redesign)
+### Where the UI lives (two toolkits, deliberately)
 
-The split is: **the hub is the place with controls; a running feature only shows
-live state.**
+The split is: **the hub is a pywebview (HTML/CSS/JS) app shell; a running
+feature draws its own tkinter bubble with live state only.**
 
-- **Hub window** (800px wide at text scale 1.0, height fits the content, never
-  scrolls) — one big row per feature. The whole row toggles the feature (click,
-  Space or Return); state is the word On/Off plus a green border plus the switch
-  position, so it never depends on colour alone. Each row also has a **Settings**
-  button, and the footer has `N of 4 features on` plus **A− / A+**, which rescale
-  every font AND regrow the window so nothing is clipped.
-- **Settings sheet** (per feature, opened from its row) — the switches, shortcut
-  keys, font picker and steppers that used to sit in each feature's own window.
-  It writes `features/<id>/settings.json`; the running feature notices via
-  `settings_store.Watcher` (polled ~700ms) and re-applies without a restart.
-- **Walkthrough** — a three-step modal over the hub, opened from the sheet
-  ("Show me how to use it") and automatically the first time a feature is turned
-  on (`seen_walkthrough` in `hub_state.json`).
-- **Feature bubbles** — each running feature draws one small borderless
-  always-on-top window with live state only: no settings, no shortcut rows, no
-  instructions.
+- **Hub window** (`hub.py` + `hub_ui/index.html` + `app.js` + `style.css`) —
+  a pywebview window, not tkinter. `hub.py`'s `Api` class is the only bridge
+  between Python and the page: feature discovery, subprocess start/stop/poll,
+  and reading/writing `features/<id>/settings.json` all live there and get
+  called from JS via `window.pywebview.api.*`. Left sidebar lists every
+  feature (label navigates to its page, its own switch toggles the process —
+  separate hit targets). Each feature page has a title row (name, hotkey
+  chips, on/off switches, each with an info-circle that opens a dimmed
+  popup — never a second OS window), a bespoke settings panel for anything
+  that isn't a boolean (Dyslexia's font picker/steppers, Color Blind's
+  filter-type buttons, Focus Mode's block-list/duration), and a two-column
+  body: numbered clickable instructions on the left, a placeholder panel on
+  the right reserved for a future preview. `hub_ui/style.css`'s CSS custom
+  properties mirror `shared/ui_kit.py`'s `C` dict 1:1 so the hub and the
+  still-tkinter bubbles read as one product. This is why `pywebview` and
+  (on macOS) extra `pyobjc-framework-Cocoa`/`pyobjc-framework-WebKit` are in
+  requirements.txt.
+- **Feature bubbles** — each running feature is still its own OS process
+  drawing one small borderless always-on-top tkinter window with live state
+  only: no settings, no shortcut rows, no instructions. Everything is drawn
+  on a `tk.Canvas` using `shared/ui_kit.py` (tokens `C`, `FontSet`,
+  `rounded_rect`, `pill`, `draw_switch`, `TapCanvas`, `TextButton`,
+  `CircleButton`, `progress_bar`). Follow that pattern for a bubble rather
+  than introducing ttk themes or a third toolkit — the two-toolkit split is
+  hub vs. bubbles, not "anything goes." Minimum target size is 48px, body
+  copy never below 17px, and every interactive element keeps a 2px
+  `#6f9bff` focus ring.
+- Settings themselves still live in `features/<id>/settings.json` via
+  `shared/settings_store.py`; the running feature notices a hub-made edit
+  through `settings_store.Watcher` (polled ~700ms) and re-applies without a
+  restart — unchanged by the pywebview move, since that file format was
+  always UI-agnostic.
 
-Everything is drawn on a `tk.Canvas` using `shared/ui_kit.py` (tokens `C`,
-`FontSet`, `rounded_rect`, `pill`, `draw_switch`, `TapCanvas`, `TextButton`,
-`CircleButton`, `progress_bar`). Follow that pattern rather than introducing ttk
-themes or a second toolkit. Minimum target size is 48px, body copy never below
-17px, and every interactive element keeps a 2px `#6f9bff` focus ring.
-
-Two tkinter limits the design works around: there is no translucency (rgba
+Two tkinter limits the bubbles work around: there is no translucency (rgba
 values are pre-blended to solid fills, and a "fading" ring fades its colour
 toward the surface with `ui.fade`), and there is no CSS animation (width and
-waveform animation are `after()` frame loops).
+waveform animation are `after()` frame loops). The hub itself doesn't have
+either limit — it's a real web page.
 
 ---
 
@@ -141,10 +152,11 @@ waveform animation are `after()` frame loops).
 3. Replace `main.py` with your code. It **must be runnable on its own**
    (`python features/your_feature/main.py`) with cwd = your folder.
 4. List any new deps in `requirements.txt`.
-5. Run `python hub.py` and toggle your feature on. Add a row of plain-language
-   copy to `FEATURE_COPY` in `hub.py`, and a three-step `WALKTHROUGHS` entry, so
-   your feature reads like the rest; without them the hub falls back to your
-   `feature.json` description.
+5. Run `python hub.py` and toggle your feature on. Add an entry to
+   `FEATURE_DATA` in `hub.py` (name, description, `options`/`shortcuts` with
+   info-popup text, and 3-4 numbered `instructions`) so your feature reads
+   like the rest; without it the hub falls back to your `feature.json`
+   description and shows no settings/instructions.
 
 Full contract (signals, logging, shared state, gotchas) is in
 **`features/README.md`**. Read it before building.

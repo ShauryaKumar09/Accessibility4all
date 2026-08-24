@@ -10,11 +10,17 @@ pynput==1.8.1
 pyperclip==1.9.0
 pytesseract==0.3.13
 python-dotenv==1.2.2
+pywebview==6.2.1
 sounddevice==0.5.5
 soundfile==0.12.1
 SpeechRecognition==3.16.1
-# macOS-only: global ` key listener in voice_control
+# macOS-only: global ` key listener in voice_control, plus pywebview's Cocoa
+# backend for the hub window (pywebview also needs pyobjc-framework-Cocoa
+# and pyobjc-framework-WebKit — added defensively, not yet verified on a
+# real Mac in this repo)
 pyobjc-core==12.2; sys_platform == 'darwin'
 pyobjc-framework-Quartz==12.2; sys_platform == 'darwin'
+pyobjc-framework-Cocoa==12.2; sys_platform == 'darwin'
+pyobjc-framework-WebKit==12.2; sys_platform == 'darwin'
 # Windows-only: focus Chrome window
 pygetwindow==0.0.9; sys_platform == 'win32'

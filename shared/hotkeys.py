@@ -59,6 +59,61 @@ def format_from_tk_event(event) -> str | None:
     return "+".join(parts)
 
 
+def capture_hotkey(timeout: float = 8.0) -> str | None:
+    """Block until a key combo is pressed, return the same stored string shape
+    as `format_from_tk_event`. Used by the hub's webview frontend, which has
+    no tkinter <KeyPress> event to read — everything else about the stored
+    format is identical, so both capture paths stay interchangeable.
+    """
+    import threading
+    from pynput import keyboard
+
+    mod_keys = {
+        keyboard.Key.ctrl_l: "ctrl", keyboard.Key.ctrl_r: "ctrl",
+        keyboard.Key.alt_l: "alt", keyboard.Key.alt_r: "alt",
+        keyboard.Key.shift_l: "shift", keyboard.Key.shift_r: "shift",
+        keyboard.Key.cmd: "command", keyboard.Key.cmd_r: "command",
+    }
+    named = {
+        keyboard.Key.space: "space", keyboard.Key.enter: "enter",
+        keyboard.Key.esc: "esc", keyboard.Key.tab: "tab",
+        keyboard.Key.backspace: "backspace", keyboard.Key.delete: "delete",
+        keyboard.Key.home: "home", keyboard.Key.end: "end",
+        keyboard.Key.up: "up", keyboard.Key.down: "down",
+        keyboard.Key.left: "left", keyboard.Key.right: "right",
+        keyboard.Key.page_up: "page_up", keyboard.Key.page_down: "page_down",
+    }
+
+    modifiers: set[str] = set()
+    result: list[str | None] = [None]
+    done = threading.Event()
+
+    def on_press(key):
+        if key in mod_keys:
+            modifiers.add(mod_keys[key])
+            return
+        parts = [m for m in ("ctrl", "alt", "shift", "command") if m in modifiers]
+        name = getattr(key, "name", None)
+        if name and name.startswith("f") and name[1:].isdigit():
+            part = name.upper()
+        elif key in named:
+            part = named[key]
+        elif getattr(key, "char", None):
+            part = key.char.lower()
+        else:
+            part = str(key).replace("Key.", "").lower()
+        parts.append(part)
+        result[0] = "+".join(parts)
+        done.set()
+        return False  # stop the listener
+
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
+    done.wait(timeout)
+    listener.stop()
+    return result[0]
+
+
 def pretty(spec: str) -> str:
     """Human-facing label for a stored hotkey, e.g. `shift+command+'` -> ⇧⌘'."""
     if not spec:
