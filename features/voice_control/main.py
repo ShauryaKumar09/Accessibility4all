@@ -1428,7 +1428,7 @@ class App:
             on_error=lambda e: log("UI", f"scheduled task failed: {e}", "ERROR"))
         # The mic circle reports press/release through the same queue as the
         # global ` key, so both paths are serialised by _poll_keys.
-        self.bar = bubble.Bar(self._key_q, pyautogui.size(),
+        self.bar = bubble.Bar(self._key_q, sched=self._sched,
                               on_closed=self._on_close)
 
     # ── lifecycle ──

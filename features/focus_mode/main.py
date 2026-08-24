@@ -9,7 +9,7 @@ The block-list, duration, and "Blocking now" switch all live in the hub's
 settings sheet (features/README.md / shared/settings_store.py). This process
 watches settings.json (shared.settings_store.Watcher, same mechanism voice
 control's always_on/dictation_mode use) and owns the countdown + auto-unblock
-timer on its own Tk mainloop, since only it stays alive for the whole blocking
+timer on its own scheduler, since only it stays alive for the whole blocking
 session regardless of whether the settings sheet is open. The block is
 removed automatically when the timer ends, the switch is turned off, or this
 process shuts down, so it never outlives an active session.
@@ -25,15 +25,13 @@ import sys
 import time
 from pathlib import Path
 
-import tkinter as tk
-
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, platform as plat, settings_store as store, ui_kit as ui  # noqa: E402
-from shared.ui_kit import C                                                          # noqa: E402
+from shared import console, feature_bus, platform as plat  # noqa: E402
+from shared import settings_store as store, webbubble as wb  # noqa: E402
 
 console.configure_stdio()
 
@@ -44,10 +42,26 @@ HOSTS_PATH = (Path(r"C:\Windows\System32\drivers\etc\hosts") if plat.IS_WINDOWS
 MARK_BEGIN = "# BEGIN Accessibility4all Focus Mode"
 MARK_END = "# END Accessibility4all Focus Mode"
 
-BUBBLE_H = 52
-DOT = 12
+# Hidden while idle; while a session runs it is the design's confirmation pill,
+# with a red dot and a live countdown. Fixed width so a digit changing once a
+# second never resizes the window under the user.
+BUBBLE_W, BUBBLE_H = 236, 52
 WATCH_MS = 700
 TICK_MS = 1000
+
+BODY = """
+<div class="pill" id="pill">
+  <span class="dot" id="dot"></span>
+  <span class="label" id="label">Blocking</span>
+</div>
+"""
+CSS = """
+#pill { height: 52px; gap: 12px; padding: 0 20px; border-color: var(--accent); }
+#dot  { background: var(--stop); }
+/* the countdown ticks once a second — the digits must not jump around, so the
+   figures are tabular and the line is centred in a fixed-width pill */
+#label { font-variant-numeric: tabular-nums; }
+"""
 
 
 def log(msg: str):
@@ -130,32 +144,31 @@ def remove_block():
     _flush_dns()
 
 
-class FocusModeApp(tk.Tk):
+class FocusModeApp:
     """The bubble: hidden while idle, a pill with a live countdown while blocking."""
 
     def __init__(self):
-        super().__init__()
         self.settings = load_settings()
         self._watcher = store.Watcher(FEATURE_ID)
         self._active = False
         self._end_time = 0.0
-        self._tick_id: str | None = None
+        self._tick_id: int | None = None
+        self._sched = wb.Scheduler(on_error=lambda e: log(f"timer failed: {e}"))
+        self.bubble = wb.Bubble("Focus Mode", BODY, BUBBLE_W, BUBBLE_H,
+                                css=CSS, hidden=True, sched=self._sched,
+                                on_closed=self._sched.stop)
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
 
-        self.fonts = ui.FontSet(1.0)
-        self.title("Focus Mode")
-        self.resizable(False, False)
-        self.withdraw()
-        self._width = 0
-        self.canvas: tk.Canvas | None = None
+    def run(self):
+        self.bubble.run(self._on_started)
 
+    def _on_started(self):
         self._cleanup_stale_block()
         if bool(self.settings.get("active", False)):
             self._begin_session(resuming=True)
         save_settings(self.settings)
-        self.after(WATCH_MS, self._watch_settings)
-        self.protocol("WM_DELETE_WINDOW", self._shutdown)
-        signal.signal(signal.SIGTERM, self._shutdown)
-        signal.signal(signal.SIGINT, self._shutdown)
+        self._sched.after(WATCH_MS, self._watch_settings)
 
     def _cleanup_stale_block(self):
         """Clear a block left over from a previous crash if we're not resuming it."""
@@ -167,28 +180,6 @@ class FocusModeApp(tk.Tk):
                 log("cleared stale block from a previous session")
         except Exception as e:
             log(f"stale-block cleanup skipped: {e}")
-
-    # ── bubble drawing ──
-    def _rebuild_canvas(self, text: str):
-        text_w = self.fonts["ui"].measure(text)
-        self._width = 20 * 2 + DOT + 12 + text_w
-        if self.canvas is not None:
-            self.canvas.destroy()
-        transparent = ui.make_bubble(self, self._width, BUBBLE_H)
-        self.canvas = ui.bubble_canvas(self, self._width, BUBBLE_H, transparent)
-        self.canvas.pack(fill="both", expand=True)
-
-    def _draw(self, text: str):
-        self._rebuild_canvas(text)
-        ui.pill(self.canvas, 1, 1, self._width - 1, BUBBLE_H - 1,
-                fill=C["BUBBLE"], outline=C["ACCENT"], width=1)
-        cy = BUBBLE_H / 2
-        self.canvas.create_oval(20, cy - DOT / 2, 20 + DOT, cy + DOT / 2,
-                                fill=C["STOP_BORDER"], outline="")
-        self.canvas.create_text(20 + DOT + 12, cy, anchor="w",
-                                text=text, font=self.fonts["ui"], fill=C["FG_BUBBLE"])
-        ui.place_bottom_center(self, self._width, BUBBLE_H)
-        ui.raise_bubble(self)
 
     # ── session lifecycle ──
     def _begin_session(self, resuming: bool = False):
@@ -210,6 +201,9 @@ class FocusModeApp(tk.Tk):
         self.settings["end_time"] = end_time
         save_settings(self.settings)
         log(f"blocking {len(domains)} site(s) until {time.ctime(end_time)}")
+        self.bubble.place_stacked(FEATURE_ID)
+        feature_bus.update_presence(FEATURE_ID, os.getpid(), self.bubble.rect())
+        self.bubble.show()
         self._tick()
 
     def _end_session(self, reason: str):
@@ -219,13 +213,14 @@ class FocusModeApp(tk.Tk):
             log(f"remove_block failed: {e}")
         self._active = False
         if self._tick_id:
-            self.after_cancel(self._tick_id)
+            self._sched.after_cancel(self._tick_id)
             self._tick_id = None
         self.settings["active"] = False
         self.settings["end_time"] = 0.0
         save_settings(self.settings)
         log(f"session ended: {reason}")
-        self.withdraw()
+        feature_bus.remove_presence(FEATURE_ID)
+        self.bubble.hide()
 
     def _tick(self):
         if not self._active:
@@ -235,8 +230,8 @@ class FocusModeApp(tk.Tk):
             self._end_session("timer elapsed")
             return
         mins, secs = divmod(int(remaining), 60)
-        self._draw(f"Blocking — {mins}m {secs}s")
-        self._tick_id = self.after(TICK_MS, self._tick)
+        self.bubble.set_text("label", f"Blocking — {mins}m {secs}s")
+        self._tick_id = self._sched.after(TICK_MS, self._tick)
 
     # ── settings (edited in the hub) ──
     def _watch_settings(self):
@@ -249,10 +244,11 @@ class FocusModeApp(tk.Tk):
             elif not want_active and self._active:
                 log("settings changed in the hub — stopping session")
                 self._end_session("turned off in the hub")
-        self.after(WATCH_MS, self._watch_settings)
+        self._sched.after(WATCH_MS, self._watch_settings)
 
     def _shutdown(self, *_args):
         log("shutting down")
+        feature_bus.remove_presence(FEATURE_ID)
         if self._active:
             try:
                 remove_block()
@@ -261,16 +257,14 @@ class FocusModeApp(tk.Tk):
             self.settings["active"] = False
             self.settings["end_time"] = 0.0
             save_settings(self.settings)
-        try:
-            self.destroy()
-        except Exception:
-            pass
+        self._sched.stop()
+        self.bubble.close()
         sys.exit(0)
 
 
 def main():
     log("feature started")
-    FocusModeApp().mainloop()
+    FocusModeApp().run()
 
 
 if __name__ == "__main__":

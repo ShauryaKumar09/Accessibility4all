@@ -1,7 +1,7 @@
 {
   "click_to_analyze": true,
   "hotkeys": {
-    "analyze_selection": "shift+command+'"
+    "analyze_selection": "'"
   },
   "text_size": "medium",
   "show_raw_on_parse_error": true,

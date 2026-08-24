@@ -17,16 +17,13 @@ import signal
 import sys
 from pathlib import Path
 
-import tkinter as tk
-
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, settings_store as store, ui_kit as ui  # noqa: E402
-from shared import windows_fonts as winfonts                       # noqa: E402
-from shared.ui_kit import C                                        # noqa: E402
+from shared import console, settings_store as store, webbubble as wb  # noqa: E402
+from shared import windows_fonts as winfonts                          # noqa: E402
 
 console.configure_stdio()
 
@@ -40,10 +37,20 @@ apply_windows_substitution = winfonts.apply_windows_substitution
 restore_windows_substitution = winfonts.restore_windows_substitution
 is_font_installed = winfonts.is_font_installed
 
-BUBBLE_H = 52
-DOT = 12
+# The design's confirmation bubble: a 52px pill, a 12px green dot, four words.
+BUBBLE_W, BUBBLE_H = 196, 52
 SHOW_MS = 3000          # how long the confirmation stays up
 WATCH_MS = 700          # how often we notice the hub editing settings.json
+
+BODY = """
+<div class="pill" id="pill">
+  <span class="dot"></span>
+  <span class="label">Easier font on</span>
+</div>
+"""
+CSS = """
+#pill { height: 52px; gap: 12px; padding: 0 20px; }
+"""
 
 
 def log(msg: str):
@@ -62,72 +69,53 @@ def save_settings(settings: dict):
     store.save(FEATURE_ID, settings)
 
 
-class DyslexiaFontApp(tk.Tk):
-    """The bubble: a 12px green dot and the words `Easier font on`."""
+class DyslexiaFontApp:
+    """The bubble: a 12px green dot and the words `Easier font on`.
+
+    It has no runtime controls at all — the font choice, spacing and preview
+    belong in the hub. The process stays alive so the hub's toggle keeps
+    meaning "on", and the pill reappears for a moment whenever a setting
+    changes, then gets out of the way again.
+    """
 
     def __init__(self):
-        super().__init__()
         self.settings = load_settings()
         self._watcher = store.Watcher(FEATURE_ID)
-        self._hide_after: str | None = None
-
-        self.fonts = ui.FontSet(1.0)
-        self.title("Dyslexia Font")
-        self.resizable(False, False)
-        text_w = self.fonts["ui"].measure("Easier font on")
-        self._width = 20 * 2 + DOT + 12 + text_w
-        self._transparent = ui.make_bubble(self, self._width, BUBBLE_H)
-        self.canvas = ui.bubble_canvas(self, self._width, BUBBLE_H,
-                                       self._transparent)
-        self.canvas.pack(fill="both", expand=True)
-        self._draw()
-
-        save_settings(self.settings)
-        self.show()
-        self.after(WATCH_MS, self._watch_settings)
-        self.protocol("WM_DELETE_WINDOW", self._shutdown)
+        self._sched = wb.Scheduler(on_error=lambda e: log(f"timer failed: {e}"))
+        self.bubble = wb.Bubble("Dyslexia Font", BODY, BUBBLE_W, BUBBLE_H,
+                                css=CSS, sched=self._sched,
+                                on_closed=self._sched.stop)
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
 
-    def _draw(self):
-        self.canvas.delete("all")
-        ui.pill(self.canvas, 1, 1, self._width - 1, BUBBLE_H - 1,
-                fill=C["BUBBLE"], outline=C["BORDER_CTRL"], width=1)
-        cy = BUBBLE_H / 2
-        self.canvas.create_oval(20, cy - DOT / 2, 20 + DOT, cy + DOT / 2,
-                                fill=C["ON"], outline="")
-        self.canvas.create_text(20 + DOT + 12, cy, anchor="w",
-                                text="Easier font on", font=self.fonts["ui"],
-                                fill=C["FG_BUBBLE"])
+    def run(self):
+        self.bubble.run(self._on_started)
 
-    def show(self):
-        """Bottom-centre, briefly — then out of the way."""
-        ui.place_bottom_center(self, self._width, BUBBLE_H)
-        ui.raise_bubble(self)
-        if self._hide_after:
-            self.after_cancel(self._hide_after)
-        self._hide_after = self.after(SHOW_MS, self.withdraw)
+    def _on_started(self):
+        save_settings(self.settings)
+        self.bubble.place_stacked("dyslexia_font")
+        self.bubble.show(for_ms=SHOW_MS)
+        self._sched.after(WATCH_MS, self._watch_settings)
 
     def _watch_settings(self):
         if self._watcher.changed():
             self.settings = load_settings()
             log(f"settings changed in the hub — font is "
                 f"{self.settings.get('font_family')}")
-            self.show()
-        self.after(WATCH_MS, self._watch_settings)
+            self.bubble.place_stacked("dyslexia_font")
+        self.bubble.show(for_ms=SHOW_MS)
+        self._sched.after(WATCH_MS, self._watch_settings)
 
     def _shutdown(self, *_args):
         log("shutting down")
-        try:
-            self.destroy()
-        except Exception:
-            pass
+        self._sched.stop()
+        self.bubble.close()
         sys.exit(0)
 
 
 def main():
     log("feature started")
-    DyslexiaFontApp().mainloop()
+    DyslexiaFontApp().run()
 
 
 if __name__ == "__main__":

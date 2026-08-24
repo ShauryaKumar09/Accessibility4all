@@ -11,10 +11,10 @@ Features are discovered automatically, so separate developers can drop a new
 folder into ./features/ and it appears here with no changes to this file. See
 features/README.md for the contract every feature must follow.
 
-The hub window is the only part of this app that renders as HTML/CSS/JS —
-every feature's own small always-on-top "bubble" is still drawn with
-tkinter + shared/ui_kit.py in its own process, unchanged. `Api` below is the
-one bridge between this process's Python and the webview's JS: it owns
+This window is the app shell; every feature's own small always-on-top
+"bubble" is a separate transparent web view in its own process (see
+shared/webbubble.py). `Api` below is the one bridge between this process's
+Python and the webview's JS: it owns
 feature discovery, subprocess start/stop/poll, and reading/writing each
 feature's settings.json (via shared/settings_store.py, which the running
 feature processes already watch for changes).
