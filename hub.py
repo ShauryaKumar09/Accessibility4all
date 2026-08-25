@@ -11,10 +11,10 @@ Features are discovered automatically, so separate developers can drop a new
 folder into ./features/ and it appears here with no changes to this file. See
 features/README.md for the contract every feature must follow.
 
-The hub window is the only part of this app that renders as HTML/CSS/JS —
-every feature's own small always-on-top "bubble" is still drawn with
-tkinter + shared/ui_kit.py in its own process, unchanged. `Api` below is the
-one bridge between this process's Python and the webview's JS: it owns
+This window is the app shell; every feature's own small always-on-top
+"bubble" is a separate transparent web view in its own process (see
+shared/webbubble.py). `Api` below is the one bridge between this process's
+Python and the webview's JS: it owns
 feature discovery, subprocess start/stop/poll, and reading/writing each
 feature's settings.json (via shared/settings_store.py, which the running
 feature processes already watch for changes).
@@ -22,7 +22,10 @@ feature processes already watch for changes).
 
 from __future__ import annotations
 
+import collections
 import json
+import os
+import re
 import subprocess
 import sys
 import threading
@@ -30,18 +33,23 @@ import time
 from pathlib import Path
 
 import webview
+from dotenv import load_dotenv
 
 from shared.console import configure_stdio, safe_print
 from shared import hotkeys as hk
+from shared import pynput_darwin
 from shared import settings_store as store
 from shared import windows_fonts as winfonts
 
 configure_stdio()
+pynput_darwin.install()
+load_dotenv()
 
 ROOT = Path(__file__).parent.resolve()
 FEATURES_DIR = ROOT / "features"
 UI_DIR = ROOT / "hub_ui"
 STATE_FILE = ROOT / "hub_state.json"     # toggles + text scale
+STDERR_KEEP_LINES = 25                   # tail kept per feature, to explain a crash
 
 FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader", "dyslexia_font",
                  "colorblind_filter", "focus_mode"]
@@ -229,10 +237,16 @@ class Feature:
         self.name = data.get("name") or manifest.get("name") or dir_path.name
         self.description = data.get("description") or manifest.get("description", "")
         self.entry = manifest.get("entry", "main.py")
+        requires = manifest.get("requires_env") or []
+        self.requires_env = [str(k) for k in requires if isinstance(k, str)]
 
     @property
     def entry_path(self) -> Path:
         return self.dir / self.entry
+
+    def missing_env(self) -> list[str]:
+        """Required keys the feature would crash on, checked before launching."""
+        return [k for k in self.requires_env if not os.getenv(k)]
 
 
 def discover_features() -> list[Feature]:
@@ -302,6 +316,7 @@ class Api:
     def __init__(self):
         state = load_state()
         self._procs: dict[str, subprocess.Popen] = {}
+        self._stderr: dict[str, collections.deque] = {}
         self._enabled: set[str] = set(state.get("enabled", []))
         self.text_scale = float(state.get("text_scale", 1.0))
         self._notice = ""
@@ -494,14 +509,46 @@ class Api:
     def _start(self, feat: Feature):
         if feat.id in self._procs and self._procs[feat.id].poll() is None:
             return
+
+        missing = feat.missing_env()
+        if missing:
+            keys = ", ".join(missing)
+            safe_print(f"[hub] '{feat.name}' needs {keys} in .env — not starting",
+                       flush=True)
+            self._notice = (f"{feat.name} needs {keys}. Add it to the .env file "
+                            f"next to hub.py, then toggle again.")
+            return
+
         safe_print(f"[hub] starting '{feat.name}' -> {feat.entry_path}", flush=True)
         try:
             proc = subprocess.Popen([sys.executable, str(feat.entry_path)],
-                                    cwd=str(feat.dir))
+                                    cwd=str(feat.dir),
+                                    stderr=subprocess.PIPE,
+                                    encoding="utf-8", errors="replace")
             self._procs[feat.id] = proc
+            self._stderr[feat.id] = collections.deque(maxlen=STDERR_KEEP_LINES)
+            threading.Thread(target=self._drain_stderr, args=(feat, proc),
+                             daemon=True).start()
         except Exception as e:
             safe_print(f"[hub] failed to start '{feat.name}': {e}", flush=True)
             self._notice = f"{feat.name} could not start."
+
+    def _drain_stderr(self, feat: Feature, proc: subprocess.Popen):
+        """Echo the child's stderr to our terminal and keep the tail of it.
+
+        Capturing the pipe is what lets `poll` report *why* a feature died
+        instead of a bare exit code; echoing keeps the terminal as useful as
+        it was when stderr was inherited.
+        """
+        buf = self._stderr.get(feat.id)
+        try:
+            for line in proc.stderr:
+                line = line.rstrip()
+                safe_print(f"[{feat.id}] {line}", flush=True)
+                if buf is not None and line.strip():
+                    buf.append(line.strip())
+        except Exception:
+            pass
 
     def _stop(self, feat: Feature):
         proc = self._procs.get(feat.id)
@@ -514,6 +561,7 @@ class Api:
                 safe_print(f"[hub] '{feat.name}' didn't exit, killing", flush=True)
                 proc.kill()
         self._procs.pop(feat.id, None)
+        self._stderr.pop(feat.id, None)
 
     def restore_enabled(self):
         known = {f.id for f in self._features}
@@ -553,11 +601,32 @@ class Api:
                 code = proc.returncode
                 self._procs.pop(feat.id, None)
                 self._enabled.discard(feat.id)
+                reason = self._crash_reason(feat.id, code)
+                self._stderr.pop(feat.id, None)
                 if code != 0:
-                    self._notice = f"{feat.name} stopped unexpectedly."
-                    safe_print(f"[hub] '{feat.name}' exited with code {code}", flush=True)
+                    self._notice = f"{feat.name} stopped: {reason}"
+                    safe_print(f"[hub] '{feat.name}' exited with code {code} "
+                               f"({reason})", flush=True)
                 save_state(self._enabled, self.text_scale)
         return self.get_state()
+
+    def _crash_reason(self, feature_id: str, code: int) -> str:
+        """Turn a dead child into one line a user can act on.
+
+        Prefers the exception line at the end of a traceback; falls back to the
+        last thing it said, then to the signal or exit code.
+        """
+        lines = list(self._stderr.get(feature_id) or [])
+        for line in reversed(lines):
+            m = re.match(r"^(?:\w+\.)*(\w*(?:Error|Exception))\b\s*:?\s*(.*)$", line)
+            if m:
+                detail = m.group(2).strip()
+                return detail or m.group(1)
+        if lines:
+            return lines[-1]
+        if code < 0:
+            return f"killed by signal {-code}"
+        return f"exit code {code}"
 
     # ── text size ──
     def set_text_scale(self, scale: float) -> float:

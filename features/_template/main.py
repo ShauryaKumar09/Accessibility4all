@@ -8,7 +8,9 @@ switched ON, and terminates that process when the toggle is switched OFF. So:
   * This file must be runnable on its own:  python features/<your_feature>/main.py
   * It runs in its own process — a crash here will NOT take down the hub or any
     other feature.
-  * You can use anything: tkinter, a background loop, OpenCV, sockets, etc.
+  * You can use anything: a background loop, OpenCV, sockets, etc. If you want
+    the small floating window every shipped feature shows, build it with
+    shared/webbubble.py (see features/README.md).
   * When toggled OFF the hub sends a terminate signal. Do cleanup in a SIGTERM
     handler (see below) or an atexit hook if you hold resources (cameras, files).
   * Anything you print goes to the hub's terminal, which is great for debugging.

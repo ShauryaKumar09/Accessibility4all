@@ -19,15 +19,14 @@ import signal
 import sys
 from pathlib import Path
 
-import tkinter as tk
-
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import console, platform as plat, settings_store as store, ui_kit as ui  # noqa: E402
-from shared.ui_kit import C                                                          # noqa: E402
+from shared import console, platform as plat, settings_store as store  # noqa: E402
+from shared import webbubble as wb                                     # noqa: E402
+from shared.ui_kit import C                                            # noqa: E402
 
 console.configure_stdio()
 
@@ -44,10 +43,22 @@ FILTER_TYPES = {
     "Grayscale Inverted": 2,
 }
 
-BUBBLE_H = 52
-DOT = 12
+# The design's confirmation bubble: a 52px pill, a status dot, one line.
+# Sized for the longest label ("Filter: Grayscale Inverted") so the pill never
+# has to resize itself while it is on screen.
+BUBBLE_W, BUBBLE_H = 288, 52
 SHOW_MS = 3000          # how long the confirmation stays up
 WATCH_MS = 700          # how often we notice the hub editing settings.json
+
+BODY = """
+<div class="pill" id="pill">
+  <span class="dot" id="dot"></span>
+  <span class="label" id="label"></span>
+</div>
+"""
+CSS = """
+#pill { height: 52px; gap: 12px; padding: 0 20px; }
+"""
 
 
 def log(msg: str):
@@ -134,29 +145,28 @@ def set_filter(enabled: bool, filter_type: int):
         raise RuntimeError("Registry updated but Windows did not confirm the new state.")
 
 
-class ColorblindFilterApp(tk.Tk):
-    """The bubble: a dot (colored when on, muted when off) and the filter name."""
+class ColorblindFilterApp:
+    """The bubble: a dot (coloured when on, muted when off) and the filter name."""
 
     def __init__(self):
-        super().__init__()
         self.settings = load_settings()
         self._watcher = store.Watcher(FEATURE_ID)
-        self._hide_after: str | None = None
-
-        self.fonts = ui.FontSet(1.0)
-        self.title("Color Blind Filter")
-        self.resizable(False, False)
-        self._width = 0
-        self._transparent = False
-        self.canvas: tk.Canvas | None = None
-
-        self._apply_and_draw()
-        save_settings(self.settings)
-        self.show()
-        self.after(WATCH_MS, self._watch_settings)
-        self.protocol("WM_DELETE_WINDOW", self._shutdown)
+        self._sched = wb.Scheduler(on_error=lambda e: log(f"timer failed: {e}"))
+        self.bubble = wb.Bubble("Color Blind Filter", BODY, BUBBLE_W, BUBBLE_H,
+                                css=CSS, sched=self._sched,
+                                on_closed=self._sched.stop)
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
+
+    def run(self):
+        self.bubble.run(self._on_started)
+
+    def _on_started(self):
+        self._apply_and_draw()
+        save_settings(self.settings)
+        self.bubble.place_stacked("colorblind_filter")
+        self.bubble.show(for_ms=SHOW_MS)
+        self._sched.after(WATCH_MS, self._watch_settings)
 
     def _label(self) -> str:
         if not plat.IS_WINDOWS:
@@ -165,26 +175,11 @@ class ColorblindFilterApp(tk.Tk):
             return "Filter off"
         return f"Filter: {self.settings.get('filter_name', 'Deuteranopia')}"
 
-    def _rebuild_canvas(self):
-        text_w = self.fonts["ui"].measure(self._label())
-        self._width = 20 * 2 + DOT + 12 + text_w
-        if self.canvas is not None:
-            self.canvas.destroy()
-        self._transparent = ui.make_bubble(self, self._width, BUBBLE_H)
-        self.canvas = ui.bubble_canvas(self, self._width, BUBBLE_H, self._transparent)
-        self.canvas.pack(fill="both", expand=True)
-
     def _draw(self):
-        self.canvas.delete("all")
-        ui.pill(self.canvas, 1, 1, self._width - 1, BUBBLE_H - 1,
-                fill=C["BUBBLE"], outline=C["BORDER_CTRL"], width=1)
-        cy = BUBBLE_H / 2
-        dot_color = C["ON"] if (plat.IS_WINDOWS and self.settings.get("enabled")) else C["DOT_IDLE"]
-        self.canvas.create_oval(20, cy - DOT / 2, 20 + DOT, cy + DOT / 2,
-                                fill=dot_color, outline="")
-        self.canvas.create_text(20 + DOT + 12, cy, anchor="w",
-                                text=self._label(), font=self.fonts["ui"],
-                                fill=C["FG_BUBBLE"])
+        on = bool(plat.IS_WINDOWS and self.settings.get("enabled"))
+        self.bubble.set_text("label", self._label())
+        self.bubble.set_style("dot", "background",
+                              C["ON"] if on else C["DOT_IDLE"])
 
     def _apply_and_draw(self):
         if plat.IS_WINDOWS:
@@ -193,37 +188,27 @@ class ColorblindFilterApp(tk.Tk):
                           FILTER_TYPES[self.settings.get("filter_name", "Deuteranopia")])
             except Exception as e:
                 log(f"apply failed: {e}")
-        self._rebuild_canvas()
         self._draw()
-
-    def show(self):
-        """Bottom-centre, briefly — then out of the way."""
-        ui.place_bottom_center(self, self._width, BUBBLE_H)
-        ui.raise_bubble(self)
-        if self._hide_after:
-            self.after_cancel(self._hide_after)
-        self._hide_after = self.after(SHOW_MS, self.withdraw)
 
     def _watch_settings(self):
         if self._watcher.changed():
             self.settings = load_settings()
             log(f"settings changed in the hub — {self._label()}")
             self._apply_and_draw()
-            self.show()
-        self.after(WATCH_MS, self._watch_settings)
+            self.bubble.place_stacked("colorblind_filter")
+        self.bubble.show(for_ms=SHOW_MS)
+        self._sched.after(WATCH_MS, self._watch_settings)
 
     def _shutdown(self, *_args):
         log("shutting down")
-        try:
-            self.destroy()
-        except Exception:
-            pass
+        self._sched.stop()
+        self.bubble.close()
         sys.exit(0)
 
 
 def main():
     log("feature started")
-    ColorblindFilterApp().mainloop()
+    ColorblindFilterApp().run()
 
 
 if __name__ == "__main__":

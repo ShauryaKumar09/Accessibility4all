@@ -16,12 +16,12 @@ subtext and flags uncertainty rather than over-claiming.
 Runs as its own process when toggled ON in the hub. See features/README.md. Mirrors
 the structure of features/page_reader/main.py.
 
-THREAD-SAFETY (critical, see CLAUDE.md): tkinter is not thread-safe and touching a
-widget from a non-main thread segfaults on macOS. The pynput keyboard/mouse listener
-callbacks run on their own threads and must ONLY mutate plain Python state; every UI
-update or worker dispatch is marshalled onto the main thread via self.after(0, ...).
-We also run at most one keyboard listener + one mouse listener at a time (stacking
-multiple keyboard event taps is what crashed earlier versions on macOS).
+THREADING (critical, see CLAUDE.md): the pynput keyboard/mouse listener callbacks
+run on their own threads and must ONLY mutate plain Python state; every UI update
+or worker dispatch is handed to `self.after(0, ...)`, which runs it on the one
+scheduler thread (shared/webbubble.py) in the order it was queued. We also run at
+most one keyboard listener + one mouse listener at a time (stacking multiple
+keyboard event taps is what crashed earlier versions on macOS).
 """
 
 from __future__ import annotations
@@ -36,27 +36,27 @@ from pathlib import Path
 
 import pyautogui
 import pyperclip
-import tkinter as tk
 from dotenv import load_dotenv
 from groq import Groq
 from pynput import keyboard, mouse
-from tkinter import font as tkfont
 
 FEATURE_DIR = Path(__file__).resolve().parent
 ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import (console, feature_bus, platform as plat, screen_ocr,  # noqa: E402
-                    settings_store as store, ui_kit as ui)
+from shared import (console, feature_bus, groq_models, platform as plat,  # noqa: E402
+                    pynput_darwin, screen_ocr, settings_store as store,
+                    webbubble as wb)
 from shared.ui_kit import C  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
+pynput_darwin.install()
 load_dotenv()
 
 SETTINGS_FILE = FEATURE_DIR / "settings.json"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = groq_models.TEXT_MODEL
 GROQ_TIMEOUT = 30
 MAX_INPUT_CHARS = 4000
 
@@ -94,11 +94,50 @@ REC = C["STOP_BORDER"]
 CARD_W = 400
 CARD_PAD_X, CARD_PAD_Y = 22, 20
 CARD_GAP = 12
-BUTTON_H = 52
 MARGIN = 12
 SETTINGS_WATCH_MS = 700
 # Three named sizes replace the old free-form spinbox.
 TEXT_SIZES = store.TONE_TEXT_SIZES
+
+# The design's tone bubble: the answer first, one large dismiss button. No tone
+# jargon, no confidence scores, no settings — those are all in the hub. The card
+# grows with the answer, so its height is measured from the page after each
+# render and the window is fitted to it before the card is shown.
+BODY = """
+<div class="card" id="card">
+  <div class="chip" id="chip"></div>
+  <div class="answer" id="answer"></div>
+  <div class="btn" id="got">Got it</div>
+</div>
+"""
+CSS = """
+#card   { width: %(W)dpx; padding: %(PY)dpx %(PX)dpx; gap: %(GAP)dpx; }
+#chip:empty { display: none; }
+#chip.neutral { background: %(CHIP)s; border-color: %(BORDER_CHIP)s;
+                color: %(FG_SECOND)s; font-weight: 400; }
+#answer { font-size: 22px; line-height: 1.45; color: var(--fg);
+          text-wrap: pretty; }
+""" % {"W": CARD_W, "PX": CARD_PAD_X, "PY": CARD_PAD_Y, "GAP": CARD_GAP,
+       "CHIP": C["CHIP"], "BORDER_CHIP": C["BORDER_CHIP"],
+       "FG_SECOND": C["FG_SECOND"]}
+
+JS = """
+document.getElementById('got').addEventListener('click',
+  () => window.pywebview.api.dismiss());
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') window.pywebview.api.dismiss();
+});
+"""
+
+
+class _Api:
+    """What the card can call: its one button, and Esc."""
+
+    def __init__(self, on_dismiss):
+        self._on_dismiss = on_dismiss
+
+    def dismiss(self):
+        self._on_dismiss()
 
 _MODIFIER_TOKENS = ("ctrl", "alt", "shift", "cmd")
 
@@ -162,9 +201,8 @@ def parse_combo(spec: str) -> frozenset[str]:
     return frozenset(toks)
 
 
-class ToneReaderApp(tk.Tk):
+class ToneReaderApp:
     def __init__(self):
-        super().__init__()
         self.settings = load_settings()
 
         # Input state — only ever mutated from the listener threads (plain data).
@@ -184,14 +222,29 @@ class ToneReaderApp(tk.Tk):
         self._bounds: tuple[int, int, int, int] | None = None
         self._watcher = store.Watcher("tone_reader")
 
+        self._sched = wb.Scheduler(on_error=lambda e: log(f"timer failed: {e}"))
         self._build_ui()
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
+
+    # ── lifecycle ──
+    def run(self):
+        """Block until the card's window closes; the card itself starts hidden."""
+        self.bubble.run(self._on_started)
+
+    def _on_started(self):
         save_settings(self.settings)
         self._update_presence()
         self._start_keyboard_listener()
         self._ensure_mouse_listener()
         self.after(SETTINGS_WATCH_MS, self._watch_settings)
-        signal.signal(signal.SIGTERM, self._shutdown)
-        signal.signal(signal.SIGINT, self._shutdown)
+
+    # ── timers (what tkinter's after() used to give us) ──
+    def after(self, ms: float, fn) -> int:
+        return self._sched.after(ms, fn)
+
+    def after_cancel(self, tid):
+        self._sched.after_cancel(tid)
 
     def _groq_client(self) -> Groq:
         if self._groq is None:
@@ -210,102 +263,60 @@ class ToneReaderApp(tk.Tk):
         option, the hotkey row and the text-size control all moved into the
         hub's settings sheet.
         """
-        self.title("Tone & Social Cues")
-        self.resizable(False, False)
-        self.fonts = ui.FontSet(1.0)
         self._card_h = 200
         self._visible = False
-        self._transparent = ui.make_bubble(self, CARD_W, self._card_h)
-        self.canvas = ui.bubble_canvas(self, CARD_W, self._card_h,
-                                       self._transparent)
-        self.canvas.pack(fill="both", expand=True)
+        self.bubble = wb.Bubble(
+            "Tone & Social Cues", BODY, CARD_W, self._card_h, css=CSS, js=JS,
+            api=_Api(lambda: self.after(0, self.hide_card)), hidden=True,
+            sched=self._sched, on_closed=self._sched.stop)
 
-        self._dismiss = ui.TextButton(
-            self.canvas, self.fonts, "Got it", self.hide_card, role="body_sm",
-            height=BUTTON_H, width=CARD_W - CARD_PAD_X * 2, radius=12)
-        self.canvas.create_window(CARD_PAD_X, 0, window=self._dismiss,
-                                  anchor="nw", tags="dismiss")
-
-        self.bind("<Escape>", lambda e: self.hide_card())
-        self.withdraw()
-
-    def _answer_font(self):
-        size = TEXT_SIZES.get(self.settings.get("text_size", "medium"), 22)
-        return tkfont.Font(family="Helvetica", size=size)
+    def _answer_px(self) -> int:
+        return TEXT_SIZES.get(self.settings.get("text_size", "medium"), 22)
 
     def show_card(self, tone: str, answer: str, tone_color: bool = True):
-        """Draw the card and put it next to the pointer, on screen."""
-        font = self._answer_font()
-        line_h = int(font.metrics("linespace") * 1.45)
-        inner = CARD_W - CARD_PAD_X * 2
+        """Fill the card, fit the window to it, and put it by the pointer."""
+        self.bubble.set_text("chip", tone)
+        self.bubble.set_class("chip", "neutral", not tone_color)
+        self.bubble.set_text("answer", answer)
+        self.bubble.set_style("answer", "font-size", f"{self._answer_px()}px")
 
-        chip_font = self.fonts["ui_b"]
-        chip_h = chip_font.metrics("linespace") + 12 if tone else 0
-        lines = ui.wrap_lines(font, answer, inner)
-        height = (CARD_PAD_Y * 2 + (chip_h + CARD_GAP if tone else 0)
-                  + len(lines) * line_h + CARD_GAP + BUTTON_H)
-
+        # the card is laid out even while the window is hidden, so its real
+        # height is known before anyone sees it — no resize flicker
+        height = int(self.bubble.measure(
+            "document.getElementById('card').offsetHeight", self._card_h))
         self._card_h = height
-        self.canvas.configure(width=CARD_W, height=height)
-        self.canvas.delete("card")
-        ui.rounded_rect(self.canvas, 1, 1, CARD_W - 1, height - 1, 16,
-                        fill=C["BUBBLE"], outline=C["BORDER_CTRL"], width=1,
-                        tags="card")
-        self.canvas.tag_lower("card")
-
-        y = CARD_PAD_Y
-        if tone:
-            chip_w = chip_font.measure(tone) + 28
-            fill = C["WARM_BG"] if tone_color else C["CHIP"]
-            border = C["WARM_BORDER"] if tone_color else C["BORDER_CHIP"]
-            text_col = C["WARM_TEXT"] if tone_color else C["FG_SECOND"]
-            ui.pill(self.canvas, CARD_PAD_X, y, CARD_PAD_X + chip_w, y + chip_h,
-                    fill=fill, outline=border, width=1, tags="card")
-            self.canvas.create_text(CARD_PAD_X + chip_w / 2, y + chip_h / 2,
-                                    text=tone, font=chip_font, fill=text_col,
-                                    tags="card")
-            y += chip_h + CARD_GAP
-
-        for line in lines:
-            self.canvas.create_text(CARD_PAD_X, y + line_h / 2, anchor="w",
-                                    text=line, font=font, fill=C["FG"],
-                                    tags="card")
-            y += line_h
-        y += CARD_GAP
-        self.canvas.coords("dismiss", CARD_PAD_X, y)
-
+        self.bubble.resize_content(CARD_W, height)
         self._place_near_pointer(height)
+        self.bubble.show()
         self._visible = True
-        ui.raise_bubble(self)
         self._ensure_mouse_listener()
 
     def _place_near_pointer(self, height: int):
         """Next to the selection — i.e. where the pointer is — clamped on screen."""
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        sw, sh = wb.screen_size()
         try:
-            # pyautogui, pynput and Tk all speak logical points on macOS, so the
-            # pointer position needs no Retina scaling here.
+            # pyautogui, pynput and the window manager all speak logical points
+            # on macOS, so the pointer position needs no Retina scaling here.
             px, py = pyautogui.position()
         except Exception:
             px, py = sw // 2, sh // 2
-        x = min(max(MARGIN, px - CARD_W // 2), sw - CARD_W - MARGIN)
+        w, h = self.bubble.w, self.bubble.h
+        x = min(max(MARGIN, px - w // 2), sw - w - MARGIN)
         y = py + 24
-        if y + height > sh - MARGIN:
-            y = max(MARGIN, py - height - 24)
-        self.geometry(f"{CARD_W}x{height}+{int(x)}+{int(y)}")
-        self._bounds = (x, y, x + CARD_W, y + height)
+        if y + h > sh - MARGIN:
+            y = max(MARGIN, py - h - 24)
+        self.bubble.move(int(x), int(y))
+        self._bounds = (self.bubble.x, self.bubble.y,
+                        self.bubble.x + w, self.bubble.y + h)
+        self._update_presence()
 
     def hide_card(self):
         self._visible = False
-        self.withdraw()
+        self.bubble.hide()
         self._ensure_mouse_listener()
 
     def _update_presence(self):
-        feature_bus.update_presence(
-            "tone_reader", os.getpid(),
-            {"x": self.winfo_x(), "y": self.winfo_y(), "w": CARD_W,
-             "h": self._card_h},
-        )
+        feature_bus.update_presence("tone_reader", os.getpid(), self.bubble.rect())
 
     def _set_status(self, msg: str, color: str = MUTED):
         """There is no status line any more: progress and errors go to the
@@ -541,9 +552,10 @@ class ToneReaderApp(tk.Tk):
                 {"role": "user", "content": text},
             ],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=max(1024, groq_models.MIN_MAX_TOKENS),
+            **groq_models.TEXT_ARGS,
         )
-        raw = (response.choices[0].message.content or "").strip()
+        raw = groq_models.strip_reasoning(response.choices[0].message.content)
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -563,10 +575,10 @@ class ToneReaderApp(tk.Tk):
         return {"tone": str(data.get("tone", "")).strip().lower(), "answer": answer}
 
     # --------------------------------------------------------------- panel
-    # NOTE: tkinter exposes no ARIA / accessibility tree. This panel is a
-    # best-effort keyboard-and-contrast approximation (focusable + scrollable
-    # body, Esc to dismiss, high-contrast palette, adjustable font) — it is not
-    # a screen-reader-native surface.
+    # NOTE: the card is a web view, but a frameless always-on-top one that no
+    # screen reader is told about. It stays a best-effort keyboard-and-contrast
+    # approximation (Esc to dismiss, high-contrast palette, adjustable text
+    # size) rather than a screen-reader-native surface.
 
     def _open_panel_loading(self):
         self.show_card("", "Reading the tone…", tone_color=False)
@@ -591,7 +603,8 @@ class ToneReaderApp(tk.Tk):
         if self._mouse_listener:
             self._mouse_listener.stop()
         feature_bus.remove_presence("tone_reader")
-        self.after(0, self.destroy)
+        self._sched.stop()
+        self.bubble.close()
         sys.exit(0)
 
 
@@ -604,7 +617,7 @@ def main():
     if hint:
         log(hint)
     app = ToneReaderApp()
-    app.mainloop()
+    app.run()
     feature_bus.remove_presence("tone_reader")
     log("exited")
 

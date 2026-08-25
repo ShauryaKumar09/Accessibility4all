@@ -325,3 +325,101 @@ def all_reading_order(elements: list[dict]) -> list[str]:
             continue
         lines.append(text)
     return lines
+
+
+# ── finding an input field by how it LOOKS, not what it says ──────────────────
+# OCR only finds a search box when the placeholder text happens to say "search",
+# which plenty of sites don't (Amazon's says "Ask Alexa a question") and plenty
+# more leave empty. Asking a vision model to point at it is unreliable in the
+# other direction — it answers with a plausible-looking coordinate even when it
+# has no idea, and a wrong coordinate means a click on whatever is there.
+#
+# A text input has a shape worth looking for directly: a wide, short, evenly
+# filled rectangle, bounded on every side by something that isn't it. That is
+# cheap to find in the pixels and, unlike the model, it can say "nothing here".
+_FIELD_MIN_W = 180          # narrower than this is a button, not a field
+_FIELD_MIN_H, _FIELD_MAX_H = 20, 70
+_FIELD_MAX_W_FRAC = 0.7     # wider than this is a banner or the page itself
+_FIELD_EDGE_GAP = 10        # a field never runs to the viewport edge
+_FIELD_FLAT_TOL = 12        # max channel-sum change between neighbouring pixels
+_FIELD_MIN_SIDE_CONTRAST = 25
+_FIELD_TOP_FRACTION = 0.35  # search bars live in the top third of the page
+
+
+def find_input_field(img: "Image.Image",
+                     top_fraction: float = _FIELD_TOP_FRACTION) -> tuple | None:
+    """Locate the most input-shaped rectangle near the top of a page image.
+
+    Returns (x0, y0, x1, y1) in image coordinates, or None when nothing in the
+    band looks like a field — the None is the point of this function, so callers
+    can fall back instead of clicking a guess.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    a = np.asarray(img.convert("RGB")).astype(np.int16)
+    height, width, _ = a.shape
+    limit = max(1, int(height * top_fraction))
+    band = a[:limit]
+
+    # a pixel is "flat" when it barely differs from the pixel to its right; a
+    # filled input is a solid run of them, text and images are not
+    flat = np.abs(band[:, 1:, :] - band[:, :-1, :]).sum(axis=2) < _FIELD_FLAT_TOL
+
+    runs: dict[int, list[tuple[int, int]]] = {}
+    for y in range(limit):
+        row, x = flat[y], 0
+        while x < width - 1:
+            if row[x]:
+                start = x
+                while x < width - 1 and row[x]:
+                    x += 1
+                if x - start >= _FIELD_MIN_W:
+                    runs.setdefault(y, []).append((start, x))
+            x += 1
+
+    best, best_score = None, 0.0
+    claimed: set[tuple[int, int]] = set()
+    for y in sorted(runs):
+        for x0, x1 in runs[y]:
+            if (y, x0) in claimed:
+                continue
+            # stack the rows below whose runs still overlap this one
+            lo, hi, bottom = x0, x1, y + 1
+            while bottom in runs:
+                match = next(((a0, a1) for a0, a1 in runs[bottom]
+                              if min(hi, a1) - max(lo, a0) > 0.7 * (hi - lo)), None)
+                if match is None:
+                    break
+                claimed.add((bottom, match[0]))
+                lo, hi = max(lo, match[0]), min(hi, match[1])
+                bottom += 1
+
+            w, h = hi - lo, bottom - y
+            if not (_FIELD_MIN_H <= h <= _FIELD_MAX_H and w >= _FIELD_MIN_W):
+                continue
+            if (lo < _FIELD_EDGE_GAP or hi > width - _FIELD_EDGE_GAP
+                    or w > _FIELD_MAX_W_FRAC * width):
+                continue
+
+            inner = a[y:bottom, lo:hi].mean(axis=(0, 1))
+            left = a[y:bottom, max(0, lo - 10):lo].reshape(-1, 3)
+            right = a[y:bottom, hi:min(width, hi + 10)].reshape(-1, 3)
+            above = a[max(0, y - 12):y, lo:hi].reshape(-1, 3)
+            below = a[bottom:min(height, bottom + 12), lo:hi].reshape(-1, 3)
+            if not len(left) or not len(right) or not len(above) + len(below):
+                continue
+            side = (np.abs(inner - left.mean(axis=0)).sum()
+                    + np.abs(inner - right.mean(axis=0)).sum()) / 2
+            if side < _FIELD_MIN_SIDE_CONTRAST:
+                continue
+            outer = np.concatenate([p for p in (above, below) if len(p)])
+            updown = np.abs(inner - outer.mean(axis=0)).sum()
+
+            score = (w / 10 + updown / 6 + side / 10
+                     - (y / limit) * 30 + (28 - abs(h - 34)))
+            if score > best_score:
+                best, best_score = (int(lo), int(y), int(hi), int(bottom)), score
+    return best

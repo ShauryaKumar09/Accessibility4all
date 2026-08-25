@@ -40,8 +40,10 @@ Toggle **Page Reader** ON in the hub (`python hub.py`).
 |--------|-----|
 | Read Chrome page | Default hotkey **F9** (focuses Chrome, reads only the browser window) |
 | Stop speaking | Default hotkey **F10** |
+| Read the page by voice | Voice Control ON → just say “read” (also “read this”, “read the page”, “start reading”; lead-ins like “okay, yeah…” are ignored) |
 | Read a section by voice | Voice Control ON + “Voice-guided sections” → e.g. “read the billing information” |
-| Read last section | “read that again” (via Voice Control) |
+| Read last section | “read that again” / “repeat that” (via Voice Control) |
+| Stop by voice | “stop reading” (or a bare “stop” while Page Reader is on) |
 | Hover-to-read | Turn on "Read when I rest the pointer" in the hub, then pause the mouse over text (~0.5s) |
 | Pause / resume | The round button on the bubble |
 

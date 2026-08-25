@@ -63,7 +63,8 @@ hub_state.json          ← auto-created; toggles, text size, walkthroughs seen
 requirements.txt        ← shared deps for the hub + all features
 .env                    ← secrets (GROQ_API_KEY); git-ignored, never committed
 shared/
-├── ui_kit.py           ← design tokens + canvas-drawn widgets (the whole look)
+├── ui_kit.py           ← the design tokens (colours, type scale, min sizes)
+├── webbubble.py        ← the floating bubble kit every feature's window uses
 ├── settings_store.py   ← per-feature settings.json + a change Watcher
 ├── hotkeys.py          ← hotkey strings, and capture from a tkinter key event
 ├── windows_fonts.py    ← Windows font substitution (hub + dyslexia_font)
@@ -75,6 +76,7 @@ features/
 └── voice_control/      ← the first real feature (voice → Chrome control)
     ├── feature.json    ← manifest (name, description, entry, version, author)
     ├── settings.json   ← this feature's settings; the HUB writes them
+    ├── bubble.py       ← the floating compact bar (a transparent web view)
     └── main.py         ← runnable entry point
 ```
 
@@ -97,12 +99,14 @@ process** (`subprocess.Popen([python, entry], cwd=feature_dir)`):
 
 This process-per-feature model is deliberate: it lets separate developers own
 separate folders without merge conflicts, and it's required because GUI features
-(like voice control) each need their own tkinter main loop.
+(like voice control) each need their own GUI main loop.
 
-### Where the UI lives (two toolkits, deliberately)
+### Where the UI lives
 
-The split is: **the hub is a pywebview (HTML/CSS/JS) app shell; a running
-feature draws its own tkinter bubble with live state only.**
+Everything the user sees is HTML/CSS/JS in a pywebview window. The split is
+**one hub window (a full app shell) and one small floating bubble per running
+feature (live state only)** — the design's "settings live in the hub, the
+desktop only gets a bubble".
 
 - **Hub window** (`hub.py` + `hub_ui/index.html` + `app.js` + `style.css`) —
   a pywebview window, not tkinter. `hub.py`'s `Api` class is the only bridge
@@ -118,30 +122,39 @@ feature draws its own tkinter bubble with live state only.**
   body: numbered clickable instructions on the left, a placeholder panel on
   the right reserved for a future preview. `hub_ui/style.css`'s CSS custom
   properties mirror `shared/ui_kit.py`'s `C` dict 1:1 so the hub and the
-  still-tkinter bubbles read as one product. This is why `pywebview` and
+  bubbles read as one product. This is why `pywebview` and
   (on macOS) extra `pyobjc-framework-Cocoa`/`pyobjc-framework-WebKit` are in
   requirements.txt.
-- **Feature bubbles** — each running feature is still its own OS process
-  drawing one small borderless always-on-top tkinter window with live state
-  only: no settings, no shortcut rows, no instructions. Everything is drawn
-  on a `tk.Canvas` using `shared/ui_kit.py` (tokens `C`, `FontSet`,
-  `rounded_rect`, `pill`, `draw_switch`, `TapCanvas`, `TextButton`,
-  `CircleButton`, `progress_bar`). Follow that pattern for a bubble rather
-  than introducing ttk themes or a third toolkit — the two-toolkit split is
-  hub vs. bubbles, not "anything goes." Minimum target size is 48px, body
-  copy never below 17px, and every interactive element keeps a 2px
-  `#6f9bff` focus ring.
+- **Feature bubbles** (`shared/webbubble.py`) — each running feature is its
+  own OS process showing one small transparent, frameless, always-on-top
+  window with live state and at most one big action: no settings, no shortcut
+  rows, no instructions. `Bubble` is the window (give it a body, CSS, JS and a
+  size; drive it with `call` / `set_text` / `set_style` / `show` / `hide` /
+  `move`), `Scheduler` is the `after()` / `after_cancel()` that replaced Tk's
+  main loop, and `BASE_CSS` is the shared look — tokens generated from
+  `shared/ui_kit.py`'s `C` dict plus the pieces every bubble is built from:
+  `.pill`, `.card`, `.dot`, `.label`, `.chip`, `.circle`, `.track`, `.btn`.
+  Build a new bubble out of those rather than inventing a second visual
+  language. Minimum target size is 48px and body copy never below 17px.
+- **Why the bubbles are web views and not `tk.Canvas`** — a bubble has to
+  *float*: a capsule or rounded card with a drop shadow over the user's real
+  work, so everything outside its shape must be see-through. tkinter on macOS
+  cannot do that — `wm attributes -transparent` is accepted and then paints
+  the whole window solid black (checked on Tk 9.0.3), which left every pill
+  inside a visible rectangle. As HTML the shape is `border-radius`, motion is
+  CSS transitions and keyframes running on the compositor (no Python frame
+  loops), and a state change is one `evaluate_js` of about a millisecond.
+  `shared/ui_kit.py` is now just the token vocabulary — its canvas widget kit
+  went when the last canvas bubble did.
 - Settings themselves still live in `features/<id>/settings.json` via
   `shared/settings_store.py`; the running feature notices a hub-made edit
   through `settings_store.Watcher` (polled ~700ms) and re-applies without a
   restart — unchanged by the pywebview move, since that file format was
   always UI-agnostic.
 
-Two tkinter limits the bubbles work around: there is no translucency (rgba
-values are pre-blended to solid fills, and a "fading" ring fades its colour
-toward the surface with `ui.fade`), and there is no CSS animation (width and
-waveform animation are `after()` frame loops). The hub itself doesn't have
-either limit — it's a real web page.
+One habit survives from the canvas era: colours that are `rgba()` in the
+handoff are pre-blended against the surface behind them in `C`, so a token is
+a plain colour usable from either the hub's stylesheet or a bubble's.
 
 ---
 
@@ -268,12 +281,22 @@ Every run logs each step to the terminal with timings, and appends a JSON line t
   actually shown. An out-of-range / `-1` index raises a clear "no match" error
   instead of clicking somewhere random.
 
-### tkinter thread-safety (critical)
+### Threading (critical)
 
-tkinter is **not** thread-safe; calling a widget from a non-main thread segfaults
-on macOS. The audio callback runs on PortAudio's thread and must only append
-frames + store a float `level`. Worker threads update the UI only via
-`_set_status` / `_set_trial_info`, which wrap everything in `self.after(0, ...)`.
+The audio callback runs on PortAudio's thread and must only append frames +
+store a float `level` — never touch anything else. Worker threads narrate
+through `_set_status` / `_set_trial_info`, which push a closure onto `_ui_q`;
+`_drain_ui` runs it.
+
+Everything that used to be `self.after(...)` on a Tk main loop now runs on
+`webbubble.Scheduler` — one daemon thread executing timers in order, so the
+poll loops (`_poll_keys`, `_poll_meter`, `_drain_ui`) and the idle-reset timer
+keep their single-threaded guarantees. `App.after` / `App.after_cancel` are the
+same call sites as before; only the loop underneath changed. This applies to
+every feature, not just this one: page_reader's hotkey/hover callbacks and
+tone_reader's listener threads all still hand work over with `after(0, ...)`.
+Bubbles are safe to update from any thread — each setter is one `evaluate_js`
+call (~1ms) that pywebview marshals onto its own UI thread.
 
 ### Audio backend
 
@@ -288,8 +311,24 @@ Reads on-screen text aloud (OCR + TTS). See `features/page_reader/README.md`.
 
 - **Read screen** — default `F9` hotkey (user-configurable)
 - **Stop** — default `F10`
+- **Read by voice** — with Voice Control on, a bare “read” (or “read this”, “read
+  the page”, “start reading”) reads the screen now. `match_read_command` strips
+  spoken lead-ins/tails (“okay, yeah, read this please”) before matching, and
+  such short commands skip voice_control's `_should_process_command` length
+  filter — without that, “read” (4 chars) was thrown away as filler.
 - **Voice-guided sections** — when Voice Control is also on, say e.g. “read the billing information” (uses Groq)
 - **Click-to-read** — optional toggle; click any line to hear it
+
+Two rules keep reading prompt rather than mysteriously late:
+
+- **The bus listener starts at the END of `commands.jsonl`** (`feature_bus.current_offset()`)
+  and drops entries older than `STALE_COMMAND_S`. Starting at offset 0 replayed
+  every command ever written, so a read queued in an earlier session fired the
+  moment the feature was next toggled on.
+- **`Speaker` synthesizes on one thread and plays on another**, one chunk ahead,
+  and `groq_vision.script_to_lines` keeps the FIRST chunk short. Speech is per
+  chunk, so a single long chunk meant seconds of silence before anything was
+  heard, plus a synth-sized gap between every chunk.
 
 Features coordinate via `feature_bus/commands.jsonl` and `feature_bus/presence.json`
 at the project root. Shared OCR lives in `shared/screen_ocr.py`; cross-platform

@@ -10,4 +10,7 @@ feature_bus/commands.jsonl
 feature_bus/presence.json
 features/page_reader/settings.json
 features/voice_control/settings.json
+features/focus_mode/elevate_payload.json
+features/focus_mode/elevate_status.json
+features/focus_mode/hosts_backup.txt
 .venv/

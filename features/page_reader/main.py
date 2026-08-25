@@ -20,7 +20,6 @@ from pathlib import Path
 import edge_tts
 import sounddevice as sd
 import soundfile as sf
-import tkinter as tk
 from dotenv import load_dotenv
 from groq import Groq
 from pynput import keyboard, mouse
@@ -30,16 +29,18 @@ ROOT = FEATURE_DIR.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared import (console, feature_bus, groq_vision, platform as plat,  # noqa: E402
-                    screen_ocr, settings_store as store, ui_kit as ui)
+from shared import (console, feature_bus, groq_models, groq_vision,  # noqa: E402
+                    platform as plat, pynput_darwin, screen_ocr,
+                    settings_store as store, webbubble as wb)
 from shared.ui_kit import C  # noqa: E402
 
 console.configure_stdio()
 plat.enable_dpi_awareness()
+pynput_darwin.install()
 load_dotenv()
 
 SETTINGS_FILE = FEATURE_DIR / "settings.json"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = groq_models.TEXT_MODEL
 GROQ_TIMEOUT = 30
 MAX_ELEMENTS = 120
 DEFAULT_TTS_VOICE = "en-US-AvaMultilingualNeural"
@@ -87,10 +88,56 @@ PAD = 12
 GAP = 16
 WIN_W = PAD * 2 + BUTTON_D + GAP + COLUMN_W
 WIN_H = BUBBLE_H
-VC_H = 60                 # the voice bubble's height, for stacking
-MARGIN = 12
+
+# The design's Page Reader bubble: one 48px button — pause or resume — the line
+# being read, and how far through it is. Nothing else; the three reading
+# options moved to the hub.
+BODY = """
+<div class="pill" id="pill">
+  <div class="circle" id="btn">
+    <span class="glyph-pause"><i></i><i></i></span>
+    <span class="glyph-play"></span>
+  </div>
+  <div class="col">
+    <div class="label" id="line"></div>
+    <div class="track"><i id="fill"></i></div>
+  </div>
+</div>
+"""
+CSS = """
+#pill { height: %(H)dpx; gap: %(GAP)dpx; padding: 0 %(PAD)dpx; }
+.col  { display: flex; flex-direction: column; gap: 6px; width: %(COL)dpx; }
+
+/* one button, two faces: the triangle while idle or paused, the two bars
+   while it is actually speaking */
+.glyph-pause { display: none; align-items: center; gap: 5px; }
+.glyph-pause i { display: block; width: 6px; height: 18px; border-radius: 2px;
+                 background: var(--accent-on); }
+.glyph-play  { width: 0; height: 0; margin-left: 4px;
+               border-left: 15px solid var(--accent-on);
+               border-top: 9px solid transparent;
+               border-bottom: 9px solid transparent; }
+#btn.reading .glyph-pause { display: flex; }
+#btn.reading .glyph-play  { display: none; }
+""" % {"H": BUBBLE_H, "GAP": GAP, "PAD": PAD, "COL": COLUMN_W}
+
+JS = """
+document.getElementById('btn').addEventListener('click',
+  () => window.pywebview.api.toggle());
+"""
+
+
+class _Api:
+    """What the bubble's one button can call."""
+
+    def __init__(self, on_toggle):
+        self._on_toggle = on_toggle
+
+    def toggle(self):
+        self._on_toggle()
 IDLE_LINE = "Press {key} to read the screen"
 SETTINGS_WATCH_MS = 700
+STALE_COMMAND_S = 20      # a queued "read this" older than this is not acted on
 
 
 def log(msg: str):
@@ -185,7 +232,13 @@ def _match_section_local(query: str, elements: list[dict]) -> list[dict] | None:
 
 
 class Speaker:
-    """Killable TTS — neural voices via edge-tts, played through sounddevice."""
+    """Killable TTS — neural voices via edge-tts, played through sounddevice.
+
+    Two threads, not one: a synth thread turns the next chunk into audio while
+    the play thread is still speaking the current one. Doing both on a single
+    thread meant the user heard nothing for the seconds edge-tts took on the
+    first chunk, then a silent gap before every chunk after it.
+    """
 
     _STOP = object()
 
@@ -199,18 +252,22 @@ class Speaker:
         self._lines: list[str] = []
         self._pos = 0
         self._paused = False
-        self._busy = False
-        self.on_progress = None        # called from the TTS thread: (pos, total, text)
-        self._q: queue.Queue = queue.Queue()
+        self._synthesizing = False
+        self._playing = False
+        self.on_progress = None        # called from the play thread: (pos, total, text)
+        self._q: queue.Queue = queue.Queue()          # (pos, text, gen) to synthesize
+        self._audio_q: queue.Queue = queue.Queue(maxsize=2)   # ready-to-play audio
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._synth_thread = threading.Thread(target=self._run_synth, daemon=True)
+        self._play_thread = threading.Thread(target=self._run_play, daemon=True)
         self._started = False
 
     def start(self):
-        """Start the TTS worker (deferred until the window exists, see call site)."""
+        """Start the TTS workers (deferred until the window exists, see call site)."""
         if not self._started:
             self._started = True
-            self._thread.start()
+            self._synth_thread.start()
+            self._play_thread.start()
 
     def _edge_rate(self) -> str:
         """Map configured rate (~80-220 wpm) to edge-tts percent (0% = ~175 wpm)."""
@@ -233,40 +290,63 @@ class Speaker:
             except Exception:
                 pass
 
-    def _run(self):
+    def _run_synth(self):
+        """Turn queued lines into audio, one chunk ahead of the speaker."""
         asyncio.set_event_loop(self._loop)
         while True:
             item = self._q.get()
             if item is self._STOP:
+                self._audio_q.put(self._STOP)
                 self._loop.close()
-                break
+                return
             if not item:
                 continue
-            pos, text = item
-            gen = self._gen
-            self._busy = True
-            self._report(pos, text)
+            pos, text, gen = item
+            if gen != self._gen:           # stopped while this sat in the queue
+                continue
+            self._synthesizing = True
             try:
                 mp3 = self._loop.run_until_complete(self._synth(text))
                 data, sr_ = sf.read(io.BytesIO(mp3), dtype="float32")
             except Exception as e:
                 log(f"TTS synth error: {e}")
-                self._busy = False
+                self._synthesizing = False
                 continue
+            self._synthesizing = False
             if gen != self._gen or data is None or len(data) == 0:
-                self._busy = False
                 continue
-            data = data * self._volume
-            sd.play(data, sr_)
+            # Bounded hand-off: stay at most one chunk ahead, and give up the
+            # moment a stop/pause bumps the generation.
+            while gen == self._gen:
+                try:
+                    self._audio_q.put((pos, text, gen, data, sr_), timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+
+    def _run_play(self):
+        while True:
+            item = self._audio_q.get()
+            if item is self._STOP:
+                return
+            pos, text, gen, data, sr_ = item
+            if gen != self._gen:
+                continue
+            self._playing = True
+            self._report(pos, text)
+            sd.play(data * self._volume, sr_)
             while True:
-                stream = sd.get_stream()
+                try:
+                    stream = sd.get_stream()
+                except RuntimeError:       # nothing has ever been played
+                    break
                 if stream is None or not stream.active:
                     break
                 if gen != self._gen:
                     sd.stop()
                     break
                 time.sleep(0.03)
-            self._busy = False
+            self._playing = False
 
     def configure(self, rate: int, volume: float, voice: str | None = None):
         self._rate, self._volume = rate, volume
@@ -289,18 +369,22 @@ class Speaker:
         for i in range(start, len(self._lines)):
             if gen != self._gen:
                 return
-            self._q.put((i, self._lines[i]))
+            self._q.put((i, self._lines[i], gen))
 
     def _halt(self):
         """Silence the engine now, without forgetting what we were reading."""
         self._gen += 1
-        sd.stop()
         try:
-            while True:
-                self._q.get_nowait()
-        except queue.Empty:
+            sd.stop()
+        except RuntimeError:               # nothing has ever been played
             pass
-        self._busy = False
+        for q in (self._q, self._audio_q):
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+        self._playing = False
 
     def pause(self):
         if self._paused or not self._lines:
@@ -325,7 +409,8 @@ class Speaker:
         """`reading`, `paused`, or `idle` — what the bubble button shows."""
         if self._paused:
             return "paused"
-        if self._busy or not self._q.empty():
+        if (self._playing or self._synthesizing
+                or not self._q.empty() or not self._audio_q.empty()):
             return "reading"
         return "idle"
 
@@ -342,12 +427,13 @@ class Speaker:
         self.stop()
         self._q.put(self._STOP)
         if self._started:
-            self._thread.join(timeout=2)
+            self._synth_thread.join(timeout=1)
+            self._audio_q.put(self._STOP)
+            self._play_thread.join(timeout=1)
 
 
-class PageReaderApp(tk.Tk):
+class PageReaderApp:
     def __init__(self):
-        super().__init__()
         self.settings = load_settings()
         self._last_region: dict | None = None
         self._last_region_ts = 0.0
@@ -368,7 +454,19 @@ class PageReaderApp(tk.Tk):
             voice=self.settings.get("tts_voice", DEFAULT_TTS_VOICE),
         )
 
+        self._sched = wb.Scheduler(on_error=lambda e: log(f"timer failed: {e}"))
         self._build_ui()
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
+
+    # ── lifecycle ──
+    def run(self):
+        """Show the bubble and block until it closes."""
+        self.bubble.run(self._on_started)
+
+    def _on_started(self):
+        """Runs once the bubble is on screen (on a pywebview worker thread)."""
+        self._draw()
         # the speech engine only starts once the window exists (see Speaker.start)
         self.after(400, self._speaker.start)
         save_settings(self.settings)
@@ -378,11 +476,13 @@ class PageReaderApp(tk.Tk):
         self._update_hover_listener()
         self._start_bus_listener()
         self.after(SETTINGS_WATCH_MS, self._watch_settings)
-        self.after(120, lambda: ui.raise_bubble(self))
 
-        self.bind("<Configure>", self._on_configure)
-        signal.signal(signal.SIGTERM, self._shutdown)
-        signal.signal(signal.SIGINT, self._shutdown)
+    # ── timers (what tkinter's after() used to give us) ──
+    def after(self, ms: float, fn) -> int:
+        return self._sched.after(ms, fn)
+
+    def after_cancel(self, tid):
+        self._sched.after_cancel(tid)
 
     def _groq_client(self) -> Groq:
         if self._groq is None:
@@ -398,43 +498,27 @@ class PageReaderApp(tk.Tk):
         Everything that used to be here — three checkboxes and two hotkey rows —
         now lives in the hub's Page Reader settings sheet.
         """
-        self.title("Page Reader")
-        self.resizable(False, False)
-        self.fonts = ui.FontSet(1.0)
-        self._transparent = ui.make_bubble(self, WIN_W, WIN_H)
-        self.canvas = ui.bubble_canvas(self, WIN_W, WIN_H, self._transparent)
-        self.canvas.pack(fill="both", expand=True)
-
-        self._button = ui.CircleButton(
-            self.canvas, BUTTON_D, "play", command=self._on_button,
-            fill=C["ACCENT_FILL"], border=C["ACCENT"], glyph=C["ACCENT_ON"])
-        self.canvas.create_window(PAD, WIN_H / 2, window=self._button,
-                                  anchor="w")
-
         self._line = self._idle_line()
         self._fraction = 0.0
         self._line_color = C["FG_BUBBLE"]
         self._speaker.on_progress = self._on_progress
-        self._draw()
+        self.bubble = wb.Bubble(
+            "Page Reader", BODY, WIN_W, WIN_H, css=CSS, js=JS,
+            api=_Api(lambda: self.after(0, self._on_button)),
+            sched=self._sched, on_closed=self._sched.stop)
 
     def _idle_line(self) -> str:
         return IDLE_LINE.format(key=self.settings["hotkeys"]["read_screen"])
 
     def _draw(self):
-        self.canvas.delete("bubble")
-        ui.pill(self.canvas, 1, 1, WIN_W - 1, WIN_H - 1, fill=C["BUBBLE"],
-                outline=C["BORDER_CTRL"], width=1, tags="bubble")
-        self.canvas.tag_lower("bubble")
-
-        col_x = PAD + BUTTON_D + GAP
-        text = ui.ellipsize(self.fonts["ui"], self._line, COLUMN_W)
-        self.canvas.create_text(col_x, WIN_H / 2 - 10, anchor="w", text=text,
-                                font=self.fonts["ui"], fill=self._line_color,
-                                tags="bubble")
-        ui.progress_bar(self.canvas, col_x, WIN_H / 2 + 9, col_x + COLUMN_W, 5,
-                        self._fraction, tags="bubble")
-        state = self._speaker.state()
-        self._button.set_style(kind="pause" if state == "reading" else "play")
+        """Push the three things the bubble shows: the line, how far through it
+        is, and which face the button wears."""
+        self.bubble.set_text("line", self._line)
+        self.bubble.set_style("line", "color", self._line_color)
+        self.bubble.set_style("fill", "width",
+                              f"{max(0.0, min(1.0, self._fraction)) * 100:.1f}%")
+        self.bubble.set_class("btn", "reading",
+                              self._speaker.state() == "reading")
 
     def _on_button(self):
         """One button: pause what is being read, or start the screen fresh."""
@@ -482,32 +566,13 @@ class PageReaderApp(tk.Tk):
             self._draw()
         self.after(0, _apply)
 
-    def _on_configure(self, _event=None):
-        self.after(100, self._update_presence)
-
     def _position_window(self):
         """Bottom-centre, stacked above the Voice Control bubble when it's up."""
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = max(0, (sw - WIN_W) // 2)
-        y = sh - WIN_H - 80
-
-        presence = feature_bus.load_presence()
-        vc = presence.get("voice_control")
-        if vc and feature_bus.is_feature_running("voice_control"):
-            win = vc.get("window") or {}
-            vy = win.get("y", sh - VC_H - 80)
-            y = vy - WIN_H - MARGIN
-
-        self.geometry(f"{WIN_W}x{WIN_H}+{x}+{max(0, y)}")
-        self.lift()
+        self.bubble.place_stacked("page_reader")
+        self._update_presence()
 
     def _update_presence(self):
-        feature_bus.update_presence(
-            "page_reader",
-            os.getpid(),
-            {"x": self.winfo_x(), "y": self.winfo_y(), "w": WIN_W, "h": WIN_H},
-        )
+        feature_bus.update_presence("page_reader", os.getpid(), self.bubble.rect())
 
     def _register_hotkeys(self):
         if self._hotkey_listener:
@@ -574,11 +639,20 @@ class PageReaderApp(tk.Tk):
         threading.Thread(target=self._do_hover_read, args=(x, y, gen), daemon=True).start()
 
     def _start_bus_listener(self):
+        # Begin at the end of the log: commands written before we existed were
+        # meant for an earlier run, and replaying them makes the reader start
+        # talking at what looks like a random moment.
+        self._bus_offset = feature_bus.current_offset()
+
         def _poll():
             while True:
                 try:
                     entries, self._bus_offset = feature_bus.read_commands_after(self._bus_offset)
                     for entry in entries:
+                        age = feature_bus.command_age(entry)
+                        if age > STALE_COMMAND_S:
+                            log(f"ignoring stale bus command ({age:.0f}s old): {entry.get('cmd')}")
+                            continue
                         self.after(0, lambda e=entry: self._handle_bus_command(e))
                 except Exception as e:
                     log(f"bus poll error: {e}")
@@ -772,9 +846,10 @@ class PageReaderApp(tk.Tk):
                 {"role": "user", "content": user_msg},
             ],
             temperature=0,
-            max_tokens=128,
+            max_tokens=groq_models.MIN_MAX_TOKENS,
+            **groq_models.TEXT_ARGS,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = groq_models.strip_reasoning(response.choices[0].message.content)
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -791,7 +866,8 @@ class PageReaderApp(tk.Tk):
         if self._hover_listener:
             self._hover_listener.stop()
         feature_bus.remove_presence("page_reader")
-        self.after(0, self.destroy)
+        self._sched.stop()
+        self.bubble.close()
         sys.exit(0)
 
 
@@ -801,7 +877,7 @@ def main():
     if hint:
         log(hint)
     app = PageReaderApp()
-    app.mainloop()
+    app.run()
     feature_bus.remove_presence("page_reader")
     log("exited")
 

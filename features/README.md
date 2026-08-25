@@ -27,7 +27,8 @@ features/
   "description": "One sentence shown under the toggle.",
   "entry": "main.py",
   "version": "0.1.0",
-  "author": "your name"
+  "author": "your name",
+  "requires_env": ["SOME_API_KEY"]
 }
 ```
 
@@ -38,6 +39,13 @@ features/
 | `entry`       | no\*     | file the hub runs (defaults to `main.py`)            |
 | `version`     | no       | shown as `v0.1.0`                                     |
 | `author`      | no       | shown next to the version                            |
+| `requires_env`| no       | env vars you cannot run without — see below          |
+
+`requires_env` lists environment variables (normally set in the project `.env`)
+that your feature needs to even start. The hub checks them *before* launching:
+if one is missing it leaves the toggle off and says which key to add, instead
+of starting you and letting you die on an exception. Only list keys you need
+unconditionally — if a key gates one optional button, handle that yourself.
 
 \* Optional, but provide them — a missing/invalid manifest falls back to the
 folder name + `main.py`.
@@ -105,9 +113,18 @@ Use `flush=True` so lines appear immediately.
   explicit channel — don't assume a shared process.
 - **Dependencies:** list your Python deps in a `requirements.txt` inside your
   folder so others can install them. Everyone shares the one project venv.
-- **GUI is fine:** because each feature is its own process, you can build a
-  tkinter / OpenCV / Qt window freely without clashing with the hub or other
-  features.
+- **GUI is fine:** because each feature is its own process, you can open a
+  window freely without clashing with the hub or other features. For the small
+  always-on-top "bubble" every shipped feature shows, use
+  `shared/webbubble.py` — `Bubble` gives you a transparent, frameless,
+  floating window (HTML + CSS, so rounded shapes, shadows and smooth motion
+  come for free) and `Scheduler` gives you the `after()` / `after_cancel()` a
+  Tk main loop used to. `Bubble.run()` blocks your main thread; drive it from
+  anywhere with `call()`, `set_text()`, `show()` and `hide()`. Keep to the
+  shared pieces (`.pill`, `.card`, `.dot`, `.label`, `.chip`, `.circle`,
+  `.track`, `.btn`) so your bubble reads like the rest of the app: live state
+  and at most one big action, no settings, no instructions — those belong in
+  the hub.
 - **State persistence:** the hub remembers which toggles were on (in
   `../hub_state.json`) and auto-starts them next launch. You don't manage this.
 

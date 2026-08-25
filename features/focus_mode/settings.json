@@ -1,0 +1,10 @@
+{
+  "active": false,
+  "blocklist": [
+    "youtube.com",
+    "twitter.com",
+    "reddit.com"
+  ],
+  "duration_minutes": 25,
+  "end_time": 0.0
+}

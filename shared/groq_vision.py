@@ -9,13 +9,13 @@ import re
 from groq import Groq
 from PIL import Image
 
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-# Click localization is now the PRIMARY vision path for voice control. Llama-4
-# Maverick is the stronger localizer, but it is NOT enabled on this Groq account
-# (Scout is the only vision model available), so we use Scout here too. If/when
-# Maverick is enabled, set this to "meta-llama/llama-4-maverick-17b-128e-instruct"
-# and ask_groq_vision will prefer it and fall back to Scout automatically.
-VISION_CLICK_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+from shared.groq_models import (MIN_MAX_TOKENS, VISION_ARGS, VISION_MODEL,
+                                strip_reasoning)
+
+# Click localization is the PRIMARY vision path for voice control. It runs on
+# the same model as page summaries — see shared/groq_models.py for which one
+# and why.
+VISION_CLICK_MODEL = VISION_MODEL
 GROQ_TIMEOUT = 45
 
 PAGE_SUMMARY_PROMPT = """You help a blind user understand a Chrome web page quickly.
@@ -64,10 +64,11 @@ def summarize_page_image(
             ],
         }],
         temperature=0.2,
-        max_tokens=512,
+        max_tokens=MIN_MAX_TOKENS,
         timeout=GROQ_TIMEOUT,
+        **VISION_ARGS,
     )
-    text = (response.choices[0].message.content or "").strip()
+    text = strip_reasoning(response.choices[0].message.content or "")
     text = re.sub(r"\s+", " ", text)
     return text
 
@@ -97,20 +98,48 @@ def answer_page_question(client: Groq, img: Image.Image, question: str) -> str:
             ],
         }],
         temperature=0.2,
-        max_tokens=256,
+        max_tokens=MIN_MAX_TOKENS,
         timeout=GROQ_TIMEOUT,
+        **VISION_ARGS,
     )
-    text = (response.choices[0].message.content or "").strip()
+    text = strip_reasoning(response.choices[0].message.content or "")
     return re.sub(r"\s+", " ", text)
 
 
+# Speech synthesis is per chunk, so the user hears nothing until the FIRST
+# chunk is done. Keep that one to a single sentence (audio in ~1s) and let the
+# rest ride in bigger chunks, which sound more natural.
+FIRST_CHUNK_CHARS = 140
+CHUNK_CHARS = 260
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _chunk_paragraph(text: str, first: bool) -> list[str]:
+    sentences = [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
+    if not sentences:
+        return []
+    out: list[str] = []
+    buf = ""
+    for sentence in sentences:
+        limit = FIRST_CHUNK_CHARS if (first and not out) else CHUNK_CHARS
+        if buf and len(buf) + 1 + len(sentence) > limit:
+            out.append(buf)
+            buf = sentence
+        else:
+            buf = f"{buf} {sentence}".strip()
+    if buf:
+        out.append(buf)
+    return out
+
+
 def script_to_lines(script: str) -> list[str]:
-    """Keep Groq output as few spoken chunks as possible (avoid over-splitting)."""
-    script = re.sub(r"\s+", " ", (script or "").strip())
+    """Split Groq output into spoken chunks — first one short so speech starts fast."""
+    script = (script or "").strip()
     if not script:
         return []
-    # One continuous utterance unless the model used clear paragraph breaks.
-    if "\n" in script:
-        parts = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n+", script) if p.strip()]
-        return parts if parts else [script]
-    return [script]
+    paragraphs = [re.sub(r"\s+", " ", p).strip()
+                  for p in re.split(r"\n+", script) if p.strip()]
+    lines: list[str] = []
+    for para in paragraphs:
+        lines.extend(_chunk_paragraph(para, first=not lines))
+    return lines or [re.sub(r"\s+", " ", script)]
