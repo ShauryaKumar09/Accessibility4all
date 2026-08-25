@@ -38,6 +38,34 @@ def append_command(cmd: str, **kwargs):
         f.write(json.dumps(entry) + "\n")
 
 
+def current_offset() -> int:
+    """Byte offset of the end of the command log — where a fresh listener starts.
+
+    Starting at 0 would replay every command ever written (a "read the page"
+    from a previous session firing the moment the feature comes up).
+    """
+    if not COMMANDS_FILE.exists():
+        return 0
+    try:
+        return len(COMMANDS_FILE.read_text(encoding="utf-8"))
+    except OSError:
+        return 0
+
+
+def command_age(entry: dict) -> float:
+    """Seconds since the command was written; `inf` when it has no usable ts."""
+    ts = entry.get("ts")
+    if not ts:
+        return float("inf")
+    try:
+        when = datetime.fromisoformat(ts)
+    except ValueError:
+        return float("inf")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds()
+
+
 def read_commands_after(offset: int) -> tuple[list[dict], int]:
     """Return new command entries after byte offset; new offset for next poll."""
     if not COMMANDS_FILE.exists():

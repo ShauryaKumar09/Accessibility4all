@@ -591,6 +591,9 @@ def _split_compound_phrases(commands: list[str]) -> list[str]:
 def _should_process_command(command: str) -> bool:
     """Ignore filler / too-short always-on misfires."""
     c = command.strip().strip(".,")
+    intent = match_read_command(c)
+    if intent and intent["cmd"] != "stop":   # "read" is 4 letters but real
+        return True
     if len(c) < 5:
         return False
     words = c.lower().split()
@@ -629,16 +632,41 @@ def _changes_page(action: dict) -> bool:
     return False
 
 # ── Page Reader command forwarding ─────────────────────────────────────────────
-_READ_SCREEN_RE = re.compile(r"^read\s+screen\s*$", re.I)
-_STOP_READING_RE = re.compile(r"^stop\s+reading\s*$", re.I)
+# Speech arrives with lead-in noise ("okay, yeah, read this") and trailing
+# politeness ("read the page please"), so both ends are trimmed before matching.
+_READ_FILLER_RE = re.compile(
+    r"^(?:(?:okay|ok|kay|yeah|yea|yes|yep|uh|um|hmm|hey|hi|so|now|well|"
+    r"alright|right|please|can you|could you|would you|i want you to|"
+    r"i'd like you to|let's|lets)\b[\s,.\-]*)+", re.I)
+_READ_TAIL_RE = re.compile(r"[\s,]*\b(?:please|for me|to me|out loud|aloud)\b[\s,.!]*$", re.I)
+
+# A bare "read" (however it is dressed up) means the whole screen.
+_READ_SCREEN_RE = re.compile(
+    r"^(?:start\s+reading|begin\s+reading|read)"
+    r"(?:\s+(?:me|out|to\s+me|this|that|it|the|whole|entire|current))*"
+    r"(?:\s+(?:screen|page|website|site|web\s*page|text|everything|all))?"
+    r"\s*$", re.I)
+_STOP_READING_RE = re.compile(r"^stop(?:\s+(?:reading|talking|the\s+reader))?\s*$", re.I)
 _READ_LAST_RE = re.compile(
-    r"^read\s+(?:that\s+(?:again|section)|it\s+again)\s*$", re.I)
+    r"^read\s+(?:that|it|this)\s+(?:again|one\s+more\s+time)\s*$|"
+    r"^read\s+that\s+section\s*$|^repeat\s+that\s*$", re.I)
 _READ_SECTION_RE = re.compile(r"^read(?:\s+out)?(?:\s+the)?\s+(.+)$", re.I)
+
+
+def _strip_read_filler(command: str) -> str:
+    """'Okay, yeah, read this page please' → 'read this page'."""
+    cmd = command.strip().strip(".!?").strip()
+    prev = None
+    while prev != cmd:                      # fillers can stack: "okay so yeah read"
+        prev = cmd
+        cmd = _READ_FILLER_RE.sub("", cmd).strip()
+        cmd = _READ_TAIL_RE.sub("", cmd).strip()
+    return cmd.strip(" ,.")
 
 
 def match_read_command(command: str) -> dict | None:
     """If command is a page-reader intent, return {cmd, ...} else None."""
-    cmd = command.strip()
+    cmd = _strip_read_filler(command)
     if _READ_SCREEN_RE.match(cmd):
         return {"cmd": "read_screen"}
     if _STOP_READING_RE.match(cmd):
@@ -657,6 +685,11 @@ def try_forward_to_page_reader(command: str) -> tuple[bool, str | None]:
     if intent is None:
         return False, None
     if not feature_bus.is_feature_running("page_reader"):
+        # A bare "stop" is only ours while Page Reader is up; otherwise let the
+        # normal pipeline have it instead of nagging about a feature the user
+        # never asked for.
+        if intent["cmd"] == "stop":
+            return False, None
         return True, "Turn on Page Reader first"
     settings = feature_bus.load_page_reader_settings()
     if not settings.get("voice_guided", True):

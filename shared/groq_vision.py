@@ -106,13 +106,40 @@ def answer_page_question(client: Groq, img: Image.Image, question: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+# Speech synthesis is per chunk, so the user hears nothing until the FIRST
+# chunk is done. Keep that one to a single sentence (audio in ~1s) and let the
+# rest ride in bigger chunks, which sound more natural.
+FIRST_CHUNK_CHARS = 140
+CHUNK_CHARS = 260
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _chunk_paragraph(text: str, first: bool) -> list[str]:
+    sentences = [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
+    if not sentences:
+        return []
+    out: list[str] = []
+    buf = ""
+    for sentence in sentences:
+        limit = FIRST_CHUNK_CHARS if (first and not out) else CHUNK_CHARS
+        if buf and len(buf) + 1 + len(sentence) > limit:
+            out.append(buf)
+            buf = sentence
+        else:
+            buf = f"{buf} {sentence}".strip()
+    if buf:
+        out.append(buf)
+    return out
+
+
 def script_to_lines(script: str) -> list[str]:
-    """Keep Groq output as few spoken chunks as possible (avoid over-splitting)."""
-    script = re.sub(r"\s+", " ", (script or "").strip())
+    """Split Groq output into spoken chunks — first one short so speech starts fast."""
+    script = (script or "").strip()
     if not script:
         return []
-    # One continuous utterance unless the model used clear paragraph breaks.
-    if "\n" in script:
-        parts = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n+", script) if p.strip()]
-        return parts if parts else [script]
-    return [script]
+    paragraphs = [re.sub(r"\s+", " ", p).strip()
+                  for p in re.split(r"\n+", script) if p.strip()]
+    lines: list[str] = []
+    for para in paragraphs:
+        lines.extend(_chunk_paragraph(para, first=not lines))
+    return lines or [re.sub(r"\s+", " ", script)]

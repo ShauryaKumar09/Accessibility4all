@@ -311,8 +311,24 @@ Reads on-screen text aloud (OCR + TTS). See `features/page_reader/README.md`.
 
 - **Read screen** — default `F9` hotkey (user-configurable)
 - **Stop** — default `F10`
+- **Read by voice** — with Voice Control on, a bare “read” (or “read this”, “read
+  the page”, “start reading”) reads the screen now. `match_read_command` strips
+  spoken lead-ins/tails (“okay, yeah, read this please”) before matching, and
+  such short commands skip voice_control's `_should_process_command` length
+  filter — without that, “read” (4 chars) was thrown away as filler.
 - **Voice-guided sections** — when Voice Control is also on, say e.g. “read the billing information” (uses Groq)
 - **Click-to-read** — optional toggle; click any line to hear it
+
+Two rules keep reading prompt rather than mysteriously late:
+
+- **The bus listener starts at the END of `commands.jsonl`** (`feature_bus.current_offset()`)
+  and drops entries older than `STALE_COMMAND_S`. Starting at offset 0 replayed
+  every command ever written, so a read queued in an earlier session fired the
+  moment the feature was next toggled on.
+- **`Speaker` synthesizes on one thread and plays on another**, one chunk ahead,
+  and `groq_vision.script_to_lines` keeps the FIRST chunk short. Speech is per
+  chunk, so a single long chunk meant seconds of silence before anything was
+  heard, plus a synth-sized gap between every chunk.
 
 Features coordinate via `feature_bus/commands.jsonl` and `feature_bus/presence.json`
 at the project root. Shared OCR lives in `shared/screen_ocr.py`; cross-platform

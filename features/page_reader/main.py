@@ -137,6 +137,7 @@ class _Api:
         self._on_toggle()
 IDLE_LINE = "Press {key} to read the screen"
 SETTINGS_WATCH_MS = 700
+STALE_COMMAND_S = 20      # a queued "read this" older than this is not acted on
 
 
 def log(msg: str):
@@ -231,7 +232,13 @@ def _match_section_local(query: str, elements: list[dict]) -> list[dict] | None:
 
 
 class Speaker:
-    """Killable TTS — neural voices via edge-tts, played through sounddevice."""
+    """Killable TTS — neural voices via edge-tts, played through sounddevice.
+
+    Two threads, not one: a synth thread turns the next chunk into audio while
+    the play thread is still speaking the current one. Doing both on a single
+    thread meant the user heard nothing for the seconds edge-tts took on the
+    first chunk, then a silent gap before every chunk after it.
+    """
 
     _STOP = object()
 
@@ -245,18 +252,22 @@ class Speaker:
         self._lines: list[str] = []
         self._pos = 0
         self._paused = False
-        self._busy = False
-        self.on_progress = None        # called from the TTS thread: (pos, total, text)
-        self._q: queue.Queue = queue.Queue()
+        self._synthesizing = False
+        self._playing = False
+        self.on_progress = None        # called from the play thread: (pos, total, text)
+        self._q: queue.Queue = queue.Queue()          # (pos, text, gen) to synthesize
+        self._audio_q: queue.Queue = queue.Queue(maxsize=2)   # ready-to-play audio
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._synth_thread = threading.Thread(target=self._run_synth, daemon=True)
+        self._play_thread = threading.Thread(target=self._run_play, daemon=True)
         self._started = False
 
     def start(self):
-        """Start the TTS worker (deferred until the window exists, see call site)."""
+        """Start the TTS workers (deferred until the window exists, see call site)."""
         if not self._started:
             self._started = True
-            self._thread.start()
+            self._synth_thread.start()
+            self._play_thread.start()
 
     def _edge_rate(self) -> str:
         """Map configured rate (~80-220 wpm) to edge-tts percent (0% = ~175 wpm)."""
@@ -279,40 +290,63 @@ class Speaker:
             except Exception:
                 pass
 
-    def _run(self):
+    def _run_synth(self):
+        """Turn queued lines into audio, one chunk ahead of the speaker."""
         asyncio.set_event_loop(self._loop)
         while True:
             item = self._q.get()
             if item is self._STOP:
+                self._audio_q.put(self._STOP)
                 self._loop.close()
-                break
+                return
             if not item:
                 continue
-            pos, text = item
-            gen = self._gen
-            self._busy = True
-            self._report(pos, text)
+            pos, text, gen = item
+            if gen != self._gen:           # stopped while this sat in the queue
+                continue
+            self._synthesizing = True
             try:
                 mp3 = self._loop.run_until_complete(self._synth(text))
                 data, sr_ = sf.read(io.BytesIO(mp3), dtype="float32")
             except Exception as e:
                 log(f"TTS synth error: {e}")
-                self._busy = False
+                self._synthesizing = False
                 continue
+            self._synthesizing = False
             if gen != self._gen or data is None or len(data) == 0:
-                self._busy = False
                 continue
-            data = data * self._volume
-            sd.play(data, sr_)
+            # Bounded hand-off: stay at most one chunk ahead, and give up the
+            # moment a stop/pause bumps the generation.
+            while gen == self._gen:
+                try:
+                    self._audio_q.put((pos, text, gen, data, sr_), timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+
+    def _run_play(self):
+        while True:
+            item = self._audio_q.get()
+            if item is self._STOP:
+                return
+            pos, text, gen, data, sr_ = item
+            if gen != self._gen:
+                continue
+            self._playing = True
+            self._report(pos, text)
+            sd.play(data * self._volume, sr_)
             while True:
-                stream = sd.get_stream()
+                try:
+                    stream = sd.get_stream()
+                except RuntimeError:       # nothing has ever been played
+                    break
                 if stream is None or not stream.active:
                     break
                 if gen != self._gen:
                     sd.stop()
                     break
                 time.sleep(0.03)
-            self._busy = False
+            self._playing = False
 
     def configure(self, rate: int, volume: float, voice: str | None = None):
         self._rate, self._volume = rate, volume
@@ -335,18 +369,22 @@ class Speaker:
         for i in range(start, len(self._lines)):
             if gen != self._gen:
                 return
-            self._q.put((i, self._lines[i]))
+            self._q.put((i, self._lines[i], gen))
 
     def _halt(self):
         """Silence the engine now, without forgetting what we were reading."""
         self._gen += 1
-        sd.stop()
         try:
-            while True:
-                self._q.get_nowait()
-        except queue.Empty:
+            sd.stop()
+        except RuntimeError:               # nothing has ever been played
             pass
-        self._busy = False
+        for q in (self._q, self._audio_q):
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+        self._playing = False
 
     def pause(self):
         if self._paused or not self._lines:
@@ -371,7 +409,8 @@ class Speaker:
         """`reading`, `paused`, or `idle` — what the bubble button shows."""
         if self._paused:
             return "paused"
-        if self._busy or not self._q.empty():
+        if (self._playing or self._synthesizing
+                or not self._q.empty() or not self._audio_q.empty()):
             return "reading"
         return "idle"
 
@@ -388,7 +427,9 @@ class Speaker:
         self.stop()
         self._q.put(self._STOP)
         if self._started:
-            self._thread.join(timeout=2)
+            self._synth_thread.join(timeout=1)
+            self._audio_q.put(self._STOP)
+            self._play_thread.join(timeout=1)
 
 
 class PageReaderApp:
@@ -598,11 +639,20 @@ class PageReaderApp:
         threading.Thread(target=self._do_hover_read, args=(x, y, gen), daemon=True).start()
 
     def _start_bus_listener(self):
+        # Begin at the end of the log: commands written before we existed were
+        # meant for an earlier run, and replaying them makes the reader start
+        # talking at what looks like a random moment.
+        self._bus_offset = feature_bus.current_offset()
+
         def _poll():
             while True:
                 try:
                     entries, self._bus_offset = feature_bus.read_commands_after(self._bus_offset)
                     for entry in entries:
+                        age = feature_bus.command_age(entry)
+                        if age > STALE_COMMAND_S:
+                            log(f"ignoring stale bus command ({age:.0f}s old): {entry.get('cmd')}")
+                            continue
                         self.after(0, lambda e=entry: self._handle_bus_command(e))
                 except Exception as e:
                     log(f"bus poll error: {e}")
