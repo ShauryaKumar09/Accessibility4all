@@ -18,7 +18,9 @@ process shuts down, so it never outlives an active session.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -39,6 +41,8 @@ console.configure_stdio()
 
 FEATURE_ID = "focus_mode"
 BACKUP_FILE = FEATURE_DIR / "hosts_backup.txt"
+ELEVATE_PAYLOAD_FILE = FEATURE_DIR / "elevate_payload.json"
+ELEVATE_STATUS_FILE = FEATURE_DIR / "elevate_status.json"
 HOSTS_PATH = (Path(r"C:\Windows\System32\drivers\etc\hosts") if plat.IS_WINDOWS
               else Path("/etc/hosts"))
 MARK_BEGIN = "# BEGIN Accessibility4all Focus Mode"
@@ -99,9 +103,9 @@ def _flush_dns():
         pass
 
 
-def apply_block(domains: list[str]):
-    if not is_admin():
-        raise PermissionError("Run the hub as Administrator to block sites.")
+def _write_apply(domains: list[str]):
+    """The actual hosts-file write — assumes admin, called either directly
+    (already elevated) or from inside the elevated worker process."""
     original = HOSTS_PATH.read_text(encoding="utf-8", errors="ignore")
     if not BACKUP_FILE.exists():
         BACKUP_FILE.write_text(original, encoding="utf-8")
@@ -118,6 +122,86 @@ def apply_block(domains: list[str]):
     _flush_dns()
 
 
+def _write_remove():
+    if not HOSTS_PATH.exists():
+        return
+    current = HOSTS_PATH.read_text(encoding="utf-8", errors="ignore")
+    if MARK_BEGIN not in current:
+        return
+    HOSTS_PATH.write_text(_strip_block(current), encoding="utf-8")
+    _flush_dns()
+
+
+def _elevate_windows(action: str, domains: list[str] | None):
+    """Relaunch this script elevated (one UAC prompt) to do just the hosts
+    write, wait for it, and read its result from a status file — a
+    runas-elevated child's stdout isn't capturable by the non-elevated
+    parent, so exit code + status file is the only reliable channel."""
+    import pywintypes
+    import win32event
+    import win32process
+    from win32com.shell import shell, shellcon
+
+    ELEVATE_PAYLOAD_FILE.write_text(
+        json.dumps({"action": action, "domains": domains or []}), encoding="utf-8")
+    if ELEVATE_STATUS_FILE.exists():
+        ELEVATE_STATUS_FILE.unlink()
+
+    try:
+        info = shell.ShellExecuteEx(
+            nShow=0,
+            fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
+            lpVerb="runas",
+            lpFile=sys.executable,
+            lpParameters=f'"{__file__}" --elevated-run "{ELEVATE_PAYLOAD_FILE}"',
+        )
+    except pywintypes.error as e:
+        if e.winerror == 1223:  # ERROR_CANCELLED — user declined the UAC prompt
+            raise PermissionError("Administrator permission was declined.")
+        raise PermissionError(f"Could not request Administrator permission: {e}")
+
+    win32event.WaitForSingleObject(info["hProcess"], win32event.INFINITE)
+    code = win32process.GetExitCodeProcess(info["hProcess"])
+    if code != 0 or not ELEVATE_STATUS_FILE.exists():
+        raise PermissionError("Elevated hosts-file update failed.")
+    status = json.loads(ELEVATE_STATUS_FILE.read_text(encoding="utf-8"))
+    if not status.get("ok"):
+        raise PermissionError(status.get("error") or "Elevated hosts-file update failed.")
+
+
+def _elevate_mac(action: str, domains: list[str] | None):
+    """osascript's `with administrator privileges` shows a native Touch
+    ID/password prompt and, unlike Windows, gives a normal exit code/stdout
+    back — no status-file indirection needed, but use the same payload file
+    for a single consistent elevated-worker entry point on both platforms."""
+    ELEVATE_PAYLOAD_FILE.write_text(
+        json.dumps({"action": action, "domains": domains or []}), encoding="utf-8")
+    script = (f'{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} '
+              f'--elevated-run {shlex.quote(str(ELEVATE_PAYLOAD_FILE))}')
+    result = subprocess.run(
+        ["osascript", "-e", f'do shell script "{script}" with administrator privileges'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise PermissionError(result.stderr.strip() or "Administrator permission was declined.")
+
+
+def _elevate_hosts_action(action: str, domains: list[str] | None):
+    if plat.IS_WINDOWS:
+        _elevate_windows(action, domains)
+    elif plat.IS_MAC:
+        _elevate_mac(action, domains)
+    else:
+        raise PermissionError("Run as root to block or unblock sites.")
+
+
+def apply_block(domains: list[str]):
+    if not is_admin():
+        _elevate_hosts_action("apply", domains)
+        return
+    _write_apply(domains)
+
+
 def remove_block():
     if not HOSTS_PATH.exists():
         return
@@ -125,9 +209,31 @@ def remove_block():
     if MARK_BEGIN not in current:
         return
     if not is_admin():
-        raise PermissionError("Run the hub as Administrator to unblock sites.")
-    HOSTS_PATH.write_text(_strip_block(current), encoding="utf-8")
-    _flush_dns()
+        _elevate_hosts_action("remove", None)
+        return
+    _write_remove()
+
+
+def _run_elevated_worker(payload_path: str):
+    """Entry point for the relaunched, elevated process — do only the hosts
+    write and exit, never build the Tk GUI elevated."""
+    try:
+        payload = json.loads(Path(payload_path).read_text(encoding="utf-8"))
+        action = payload.get("action")
+        if action == "apply":
+            _write_apply(payload.get("domains", []))
+        elif action == "remove":
+            _write_remove()
+        else:
+            raise ValueError(f"unknown elevated action {action!r}")
+        ELEVATE_STATUS_FILE.write_text(json.dumps({"ok": True, "error": None}), encoding="utf-8")
+    except Exception as e:
+        try:
+            ELEVATE_STATUS_FILE.write_text(json.dumps({"ok": False, "error": str(e)}), encoding="utf-8")
+        except Exception:
+            pass
+        sys.exit(1)
+    sys.exit(0)
 
 
 class FocusModeApp(tk.Tk):
@@ -197,13 +303,22 @@ class FocusModeApp(tk.Tk):
         end_time = float(self.settings.get("end_time", 0.0))
         if not resuming or end_time <= time.time():
             end_time = time.time() + minutes * 60
-        try:
-            apply_block(domains)
-        except Exception as e:
-            log(f"apply_block failed: {e}")
-            self.settings["active"] = False
-            save_settings(self.settings)
-            return
+        already_blocked = HOSTS_PATH.exists() and MARK_BEGIN in HOSTS_PATH.read_text(
+            encoding="utf-8", errors="ignore")
+        if not already_blocked:
+            # The hub applies the block itself before this process even
+            # starts (see hub.py's _apply_focus_toggle) — skip a redundant
+            # call here so a non-admin user isn't hit with a second
+            # elevation prompt for the same toggle. Only actually apply if
+            # somehow not already in place (e.g. this process started
+            # independently of a hub toggle).
+            try:
+                apply_block(domains)
+            except Exception as e:
+                log(f"apply_block failed: {e}")
+                self.settings["active"] = False
+                save_settings(self.settings)
+                return
         self._active = True
         self._end_time = end_time
         self.settings["active"] = True
@@ -269,6 +384,9 @@ class FocusModeApp(tk.Tk):
 
 
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--elevated-run":
+        _run_elevated_worker(sys.argv[2])
+        return
     log("feature started")
     FocusModeApp().mainloop()
 

@@ -40,11 +40,40 @@ FONT_NOTES = {
 }
 
 SUBSTITUTION_TARGETS = (
+    # Broadened well beyond the original 6 to catch more of what apps
+    # actually declare — this only reaches apps that reference a font by
+    # one of these exact names (Win32/UWP chrome mostly); apps that embed
+    # or custom-load their own fonts (some modern apps, Electron, Chrome's
+    # own UI) are outside what any registry substitution can touch — no
+    # Windows API does a true "every app, no exceptions" override.
     "Arial",
+    "Arial Black",
     "Calibri",
+    "Calibri Light",
+    "Cambria",
+    "Candara",
+    "Comic Sans MS",
+    "Consolas",
+    "Constantia",
+    "Corbel",
+    "Courier New",
+    "Georgia",
+    "Impact",
+    "Lucida Console",
+    "Lucida Sans Unicode",
+    "Microsoft Sans Serif",
+    "MS Sans Serif",
+    "MS Shell Dlg",
+    "MS Shell Dlg 2",
+    "Palatino Linotype",
     "Segoe UI",
+    "Segoe UI Light",
+    "Segoe UI Semibold",
+    "Segoe UI Symbol",
+    "Sylfaen",
     "Tahoma",
     "Times New Roman",
+    "Trebuchet MS",
     "Verdana",
 )
 
@@ -224,6 +253,13 @@ def restore_windows_substitution() -> None:
                 winreg.HKEY_CURRENT_USER, FONT_SUBSTITUTES_PATH, target, str(old_value)
             )
     broadcast_font_change()
+    # Delete on success so BACKUP_FILE.exists() reliably means "a
+    # substitution is currently applied and not yet restored" — callers
+    # (e.g. dyslexia_font's startup crash-safety check) rely on that.
+    try:
+        BACKUP_FILE.unlink()
+    except OSError:
+        pass
 
 
 def open_extension_folder():

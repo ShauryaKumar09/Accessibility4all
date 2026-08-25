@@ -22,5 +22,8 @@ pyobjc-core==12.2; sys_platform == 'darwin'
 pyobjc-framework-Quartz==12.2; sys_platform == 'darwin'
 pyobjc-framework-Cocoa==12.2; sys_platform == 'darwin'
 pyobjc-framework-WebKit==12.2; sys_platform == 'darwin'
-# Windows-only: focus Chrome window
+# Windows-only: focus Chrome window, and focus_mode's on-demand UAC
+# elevation (ShellExecuteEx/WaitForSingleObject — plain ctypes ShellExecuteW
+# can't return a waitable process handle)
 pygetwindow==0.0.9; sys_platform == 'win32'
+pywin32==312; sys_platform == 'win32'

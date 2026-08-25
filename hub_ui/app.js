@@ -124,26 +124,27 @@ async function renderFeaturePage(main, feat) {
     <div id="settings-panel-host"></div>
   `;
 
-  renderTitleControls(feat, settings, on);
+  await renderTitleControls(feat, settings, on);
   renderSteps(feat);
 
   const panelHost = document.getElementById("settings-panel-host");
   if (feat.settingsPanel) {
     const panelData = await api().get_panel_data(feat.id);
-    if (feat.settingsPanel === "dyslexia") renderDyslexiaPanel(panelHost, feat, settings, panelData);
+    if (feat.settingsPanel === "dyslexia") renderDyslexiaPanel(panelHost, feat, settings, panelData, on);
     else if (feat.settingsPanel === "colorblind") renderColorblindPanel(panelHost, feat, settings, panelData);
     else if (feat.settingsPanel === "focus") renderFocusPanel(panelHost, feat, settings, panelData);
   }
 }
 
-function renderTitleControls(feat, settings, on) {
+async function renderTitleControls(feat, settings, on) {
   const host = document.getElementById("title-controls");
   host.innerHTML = "";
 
   for (const sc of feat.shortcuts) {
     const card = document.createElement("div");
     card.className = "control-card" + (sc.editable ? "" : " static");
-    const current = sc.editable ? (settings.hotkeys || {})[sc.key] || "" : (sc.static || "");
+    const raw = sc.editable ? (settings.hotkeys || {})[sc.key] || "" : (sc.static || "");
+    const current = raw ? await api().pretty_hotkey(raw) : "";
     card.innerHTML = `
       <span class="control-name">${escapeHtml(sc.label)}</span>
       <span class="chip-btn${sc.editable ? "" : " static"}">${escapeHtml(current || "—")}</span>
@@ -206,7 +207,7 @@ function renderSteps(feat) {
 }
 
 /* ── bespoke settings panels ─────────────────────────────────────────── */
-function renderDyslexiaPanel(host, feat, settings, panelData) {
+function renderDyslexiaPanel(host, feat, settings, panelData, on) {
   const spacing = settings.letter_spacing ?? 0.03;
   const lineHeight = settings.line_height ?? 1.55;
   host.innerHTML = `
@@ -215,12 +216,10 @@ function renderDyslexiaPanel(host, feat, settings, panelData) {
       <div class="font-grid" id="font-grid"></div>
       <div id="stepper-spacing"></div>
       <div id="stepper-line"></div>
-      <div class="small-note" id="font-status"></div>
-      <div class="win-buttons">
-        <button class="text-btn" id="open-ext">Open the extension folder</button>
-        <button class="text-btn" id="open-chrome-ext">Open Chrome extensions</button>
-        <button class="text-btn primary" id="apply-win">Use this font in Windows apps</button>
-        <button class="text-btn" id="restore-win">Put the Windows fonts back</button>
+      <div class="small-note">
+        ${on
+          ? "Applied automatically — Windows apps and websites (via the Chrome extension) update as soon as you pick a font."
+          : "Turn the switch in the sidebar on to apply this font."}
       </div>
     </div>
     <div class="screen-btn">
@@ -235,7 +234,7 @@ function renderDyslexiaPanel(host, feat, settings, panelData) {
     card.addEventListener("click", async () => {
       settings.font_family = f.name;
       await api().save_setting(feat.id, "font_family", f.name);
-      renderDyslexiaPanel(host, feat, settings, panelData);
+      renderDyslexiaPanel(host, feat, settings, panelData, on);
     });
     grid.appendChild(card);
   }
@@ -248,21 +247,6 @@ function renderDyslexiaPanel(host, feat, settings, panelData) {
     lineHeight, 1.0, 2.2, 0.05, v => `${v.toFixed(2)}×`,
     async v => { settings.line_height = v; await api().save_setting(feat.id, "line_height", v); });
 
-  document.getElementById("apply-win").addEventListener("click", async () => {
-    const status = document.getElementById("font-status");
-    status.textContent = "Applying…";
-    const res = await api().apply_windows_font(settings.font_family || "");
-    status.textContent = res.ok
-      ? "Windows apps will use this font. Sign out and back in if some apps haven't changed."
-      : res.error;
-  });
-  document.getElementById("restore-win").addEventListener("click", async () => {
-    const status = document.getElementById("font-status");
-    const res = await api().restore_windows_font();
-    status.textContent = res.ok ? "The Windows fonts were put back." : res.error;
-  });
-  document.getElementById("open-ext").addEventListener("click", () => api().open_extension_folder());
-  document.getElementById("open-chrome-ext").addEventListener("click", () => api().open_chrome_extensions());
   document.getElementById("start-screening").addEventListener("click", openScreeningModal);
 }
 

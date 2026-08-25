@@ -33,6 +33,7 @@ console.configure_stdio()
 
 FEATURE_ID = "colorblind_filter"
 COLOR_FILTERING_PATH = r"Software\Microsoft\ColorFiltering"
+ACCESSIBILITY_PATH = r"Software\Microsoft\Windows NT\CurrentVersion\Accessibility"
 
 FILTER_TYPES = {
     "Deuteranopia": 3,
@@ -87,6 +88,13 @@ def _set_registry_dword(root, path: str, name: str, value: int):
         winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, value)
 
 
+def _set_registry_string(root, path: str, name: str, value: str):
+    import winreg
+
+    with winreg.CreateKeyEx(root, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+
+
 def is_filter_active() -> bool:
     if not plat.IS_WINDOWS:
         return False
@@ -96,15 +104,23 @@ def is_filter_active() -> bool:
 
 
 def set_filter(enabled: bool, filter_type: int):
-    """Write the registry state directly — the only reliable mechanism.
+    """Write both registry locations Windows tracks for color filters.
 
-    atbroker.exe /colorfiltershortcut (simulating the Win+Ctrl+C hotkey) was
-    tried first, but it's a TOGGLE relative to the OS's own internal state,
-    and it measurably fails silently in some environments (non-zero exit, no
-    error text, Active left unchanged) — so a "successful" call is
-    indistinguishable from one that just undid our own write. Direct registry
-    write is idempotent and verifiable; the tradeoff is the OS may need a
-    lock/unlock (Win+L) or sign-out to visually refresh instantly.
+    `ColorFiltering\\Active`/`FilterType` alone is not enough — Windows also
+    tracks which assistive feature is active in `...\\Accessibility`'s
+    `Configuration` string (`"colorfiltering"` when on, `""` when off).
+    Writing only the first location left the filter invisible until a
+    lock/unlock and every filter type looking identical, which is the exact
+    bug a real user hit — Windows' own color-filter `.reg` exports touch
+    both keys, confirmed via research.
+
+    `atbroker.exe /colorfiltershortcut` (simulating the Win+Ctrl+C shortcut,
+    tried with and without the `/resettransferkeys` flag) reliably returns
+    exit code 1 and does nothing in this environment — re-tested live in a
+    real interactive session, not just the earlier sandboxed one, same
+    result both times. Not used: it's also a TOGGLE relative to Windows'
+    own internal state, so even if it worked, calling it after we've just
+    written the correct Active value risks flipping it right back off.
     """
     if not plat.IS_WINDOWS:
         raise RuntimeError("Color filters are only available on Windows.")
@@ -112,6 +128,8 @@ def set_filter(enabled: bool, filter_type: int):
 
     _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType", filter_type)
     _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active", 1 if enabled else 0)
+    _set_registry_string(winreg.HKEY_CURRENT_USER, ACCESSIBILITY_PATH, "Configuration",
+                         "colorfiltering" if enabled else "")
     if is_filter_active() != enabled:
         raise RuntimeError("Registry updated but Windows did not confirm the new state.")
 

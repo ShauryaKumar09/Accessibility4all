@@ -26,6 +26,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import webview
@@ -143,34 +144,27 @@ FEATURE_DATA = {
     "colorblind_filter": {
         "name": "Color Blind Filter",
         "description": "Makes colors on your screen easier to tell apart.",
-        "options": [
-            {"key": "enabled", "label": "Filter on",
-             "info": "Applies right away. If the screen doesn't change, try "
-                     "locking and unlocking (Win+L)."},
-        ],
+        "options": [],
         "shortcuts": [],
         "settings_panel": "colorblind",
         "instructions": [
             ["Pick your type", "Deuteranopia, Protanopia, or Tritanopia."],
-            ["Turn it on", "Applies to your whole screen right away."],
-            ["Didn't apply?", "Lock and unlock (Win+L)."],
+            ["Turn it on", "Use the switch in the sidebar — applies right away."],
+            ["Turn it off", "Same switch. Colors go back to normal instantly."],
         ],
     },
     "focus_mode": {
         "name": "Focus Mode",
         "description": "Blocks distracting sites for a set amount of time.",
-        "options": [
-            {"key": "active", "label": "Blocking",
-             "info": "Blocks the sites below, system-wide, until the timer "
-                     "runs out or you turn this off."},
-        ],
+        "options": [],
         "shortcuts": [],
         "settings_panel": "focus",
         "instructions": [
             ["List your sites", "One domain per line, like youtube.com."],
             ["Set a length", "Use +/- to pick minutes."],
             ["Turn it on",
-             "Blocked everywhere until time's up or you switch it off."],
+             "Use the switch in the sidebar. Blocked everywhere until time's "
+             "up or you switch it off."],
         ],
     },
 }
@@ -365,7 +359,15 @@ class Api:
         store.save(feature_id, settings)
         if feature_id == "colorblind_filter" and key == "enabled":
             self._apply_colorblind_filter(settings)
+        elif feature_id == "dyslexia_font" and key == "font_family" and self._is_running(feature_id):
+            # Feature's already on — reapply immediately with the new font
+            # instead of waiting for the next toggle.
+            self._apply_dyslexia_toggle(True)
         return settings
+
+    def _is_running(self, feature_id: str) -> bool:
+        proc = self._procs.get(feature_id)
+        return proc is not None and proc.poll() is None
 
     def save_hotkey(self, feature_id: str, key: str, combo: str) -> dict:
         settings = store.load(feature_id)
@@ -382,37 +384,12 @@ class Api:
     def capture_hotkey(self) -> dict:
         """Blocks (on the JS call's own thread) until a key combo is pressed."""
         combo = hk.capture_hotkey(timeout=8.0)
-        if combo is None:
-            return {"ok": False, "error": "No key detected — try again."}
+        if not combo:  # None = timed out, "" = key couldn't be cleanly identified
+            return {"ok": False, "error": "Could not read that key — try a different one."}
         return {"ok": True, "combo": combo, "label": hk.pretty(combo)}
 
-    def apply_windows_font(self, font_name: str) -> dict:
-        try:
-            winfonts.apply_windows_substitution(font_name, list(winfonts.SUBSTITUTION_TARGETS))
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def restore_windows_font(self) -> dict:
-        try:
-            winfonts.restore_windows_substitution()
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def open_extension_folder(self) -> dict:
-        try:
-            winfonts.open_extension_folder()
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def open_chrome_extensions(self) -> dict:
-        try:
-            winfonts.open_chrome_extensions()
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+    def pretty_hotkey(self, spec: str) -> str:
+        return hk.pretty(spec)
 
     def _apply_colorblind_filter(self, settings: dict):
         try:
@@ -434,15 +411,85 @@ class Api:
             return self.get_state()
         with self._lock:
             running = feat.id in self._procs and self._procs[feat.id].poll() is None
+            turning_on = not running
+            self._notice = ""
+            # Settle settings.json + the actual filter/block BEFORE the
+            # subprocess (re)starts, so its own startup read sees the final
+            # state instead of racing it — and so its own redundant apply on
+            # launch (see focus_mode's _begin_session) can see the block is
+            # already there and skip re-triggering an elevation prompt. This
+            # runs after clearing _notice above but before _start/_stop, so
+            # an error it sets (e.g. "add a site to block first") survives
+            # instead of being wiped by the old turning-on reset below.
+            self._apply_single_toggle(feat.id, turning_on)
             if running:
                 self._stop(feat)
                 self._enabled.discard(feat.id)
             else:
-                self._notice = ""
                 self._start(feat)
                 self._enabled.add(feat.id)
             save_state(self._enabled, self.text_scale)
         return self.get_state()
+
+    def _apply_single_toggle(self, feature_id: str, turning_on: bool):
+        """colorblind_filter and focus_mode collapse "is the bubble process
+        running" and "is the effect actually active" into one user-visible
+        switch — no separate in-page toggle for either. Called directly
+        rather than only through settings.json + the bubble's own watcher,
+        since on Windows `Popen.terminate()` maps straight to
+        `TerminateProcess` with no signal delivery, so a subprocess killed by
+        the hub can't reliably run its own shutdown cleanup — the block/
+        filter must be applied or removed from here to be guaranteed.
+        """
+        if feature_id == "colorblind_filter":
+            settings = store.load(feature_id)
+            settings["enabled"] = turning_on
+            store.save(feature_id, settings)
+            self._apply_colorblind_filter(settings)
+        elif feature_id == "focus_mode":
+            self._apply_focus_toggle(turning_on)
+        elif feature_id == "dyslexia_font":
+            self._apply_dyslexia_toggle(turning_on)
+
+    def _apply_dyslexia_toggle(self, turning_on: bool):
+        """Windows app-font substitution now follows the sidebar switch
+        automatically — no separate "Use this font in Windows apps" button.
+        (`website_enabled` stays its own toggle: it controls the Chrome
+        extension, a genuinely different mechanism the user may want
+        independent of whether Windows apps are substituted.)"""
+        try:
+            if turning_on:
+                settings = store.load("dyslexia_font")
+                font_name = settings.get("font_family") or winfonts.FONT_CHOICES[0]
+                winfonts.apply_windows_substitution(font_name, list(winfonts.SUBSTITUTION_TARGETS))
+            else:
+                if winfonts.BACKUP_FILE.exists():
+                    winfonts.restore_windows_substitution()
+        except Exception as e:
+            safe_print(f"[hub] dyslexia font toggle failed: {e}", flush=True)
+            self._notice = f"Dyslexia Font: {e}"
+
+    def _apply_focus_toggle(self, turning_on: bool):
+        try:
+            fm = _load_feature_module("focus_mode")
+            settings = store.load("focus_mode")
+            if turning_on:
+                domains = settings.get("blocklist", [])
+                if not domains:
+                    self._notice = "Focus Mode: add a site to block first."
+                    return
+                fm.apply_block(domains)
+                settings["active"] = True
+                settings["end_time"] = time.time() + int(
+                    settings.get("duration_minutes", 25)) * 60
+            else:
+                fm.remove_block()
+                settings["active"] = False
+                settings["end_time"] = 0.0
+            store.save("focus_mode", settings)
+        except Exception as e:
+            safe_print(f"[hub] focus mode toggle failed: {e}", flush=True)
+            self._notice = f"Focus Mode: {e}"
 
     def _start(self, feat: Feature):
         if feat.id in self._procs and self._procs[feat.id].poll() is None:
@@ -472,9 +519,31 @@ class Api:
         known = {f.id for f in self._features}
         for feat in self._features:
             if feat.id in self._enabled and feat.id in known:
+                # Re-apply the actual effect too, not just relaunch the
+                # bubble — colorblind_filter/dyslexia_font's Windows-level
+                # state doesn't survive a hub restart on its own now that
+                # applying it lives here rather than in the subprocess.
+                self._apply_single_toggle(feat.id, True)
                 self._start(feat)
         self._enabled &= known
         save_state(self._enabled, self.text_scale)
+        self._cleanup_stale_dyslexia_font()
+
+    def _cleanup_stale_dyslexia_font(self):
+        """If a previous session applied Windows font substitution and never
+        restored it (crash, force-kill) and dyslexia_font isn't enabled this
+        session, restore now — mirrors focus_mode's own stale-block cleanup,
+        done here since applying/restoring the font now lives in the hub,
+        not the feature's own subprocess."""
+        if "dyslexia_font" in self._enabled:
+            return
+        try:
+            if winfonts.BACKUP_FILE.exists():
+                winfonts.restore_windows_substitution()
+                safe_print("[hub] restored Windows font substitution left "
+                          "over from a previous session", flush=True)
+        except Exception as e:
+            safe_print(f"[hub] stale dyslexia-font cleanup failed: {e}", flush=True)
 
     def poll(self) -> dict:
         """Called by JS on a timer — detects a crashed subprocess and reflects it."""

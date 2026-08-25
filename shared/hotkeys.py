@@ -61,9 +61,13 @@ def format_from_tk_event(event) -> str | None:
 
 def capture_hotkey(timeout: float = 8.0) -> str | None:
     """Block until a key combo is pressed, return the same stored string shape
-    as `format_from_tk_event`. Used by the hub's webview frontend, which has
-    no tkinter <KeyPress> event to read — everything else about the stored
-    format is identical, so both capture paths stay interchangeable.
+    as `format_from_tk_event`, or "" if the key couldn't be cleanly identified.
+
+    Used by the hub's webview frontend, which has no tkinter <KeyPress> event
+    to read — everything else about the stored format is identical, so both
+    capture paths stay interchangeable. Never returns a raw pynput repr
+    (e.g. "<58>") — an unrecognized key must fail loudly (empty string) rather
+    than silently save a garbled, unreadable hotkey the user can't see or fix.
     """
     import threading
     from pynput import keyboard
@@ -73,6 +77,7 @@ def capture_hotkey(timeout: float = 8.0) -> str | None:
         keyboard.Key.alt_l: "alt", keyboard.Key.alt_r: "alt",
         keyboard.Key.shift_l: "shift", keyboard.Key.shift_r: "shift",
         keyboard.Key.cmd: "command", keyboard.Key.cmd_r: "command",
+        keyboard.Key.alt_gr: "altgr",
     }
     named = {
         keyboard.Key.space: "space", keyboard.Key.enter: "enter",
@@ -92,16 +97,21 @@ def capture_hotkey(timeout: float = 8.0) -> str | None:
         if key in mod_keys:
             modifiers.add(mod_keys[key])
             return
-        parts = [m for m in ("ctrl", "alt", "shift", "command") if m in modifiers]
+        parts = [m for m in ("ctrl", "alt", "altgr", "shift", "command") if m in modifiers]
         name = getattr(key, "name", None)
+        char = getattr(key, "char", None)
         if name and name.startswith("f") and name[1:].isdigit():
             part = name.upper()
         elif key in named:
             part = named[key]
-        elif getattr(key, "char", None):
-            part = key.char.lower()
+        elif char and len(char) == 1 and char.isprintable():
+            part = char.lower()
         else:
-            part = str(key).replace("Key.", "").lower()
+            # Can't cleanly identify this key (dead key, IME composition, an
+            # unmapped scan code) — refuse to save a garbled fallback.
+            result[0] = ""
+            done.set()
+            return False
         parts.append(part)
         result[0] = "+".join(parts)
         done.set()
@@ -111,6 +121,7 @@ def capture_hotkey(timeout: float = 8.0) -> str | None:
     listener.start()
     done.wait(timeout)
     listener.stop()
+    listener.join(timeout=1.0)
     return result[0]
 
 
@@ -119,7 +130,7 @@ def pretty(spec: str) -> str:
     if not spec:
         return "—"
     symbols = {"ctrl": "⌃", "control": "⌃", "alt": "⌥", "option": "⌥",
-               "shift": "⇧", "cmd": "⌘", "command": "⌘"}
+               "shift": "⇧", "cmd": "⌘", "command": "⌘", "altgr": "AltGr+"}
     out = []
     for part in spec.split("+"):
         low = part.strip().lower()
