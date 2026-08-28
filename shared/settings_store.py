@@ -57,6 +57,9 @@ DEFAULTS: dict[str, dict] = {
         "duration_minutes": 25,
         "end_time": 0.0,        # internal bookkeeping, not a settings-sheet control
     },
+    "click_highlight": {
+        "big_cursor": False,
+    },
 }
 
 TONE_TEXT_SIZES = {"small": 18, "medium": 22, "large": 28}

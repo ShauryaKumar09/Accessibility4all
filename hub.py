@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 
 from shared.console import configure_stdio, safe_print
 from shared import hotkeys as hk
+from shared import platform as plat
 from shared import pynput_darwin
 from shared import settings_store as store
 from shared import windows_fonts as winfonts
@@ -52,7 +53,7 @@ STATE_FILE = ROOT / "hub_state.json"     # toggles + text scale
 STDERR_KEEP_LINES = 25                   # tail kept per feature, to explain a crash
 
 FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader", "dyslexia_font",
-                 "colorblind_filter", "focus_mode"]
+                 "colorblind_filter", "focus_mode", "click_highlight"]
 
 # One entry per feature: display copy, settings-sheet options/shortcuts (with
 # the info-popup text for each), the numbered instructions shown on its page,
@@ -173,6 +174,22 @@ FEATURE_DATA = {
             ["Turn it on",
              "Use the switch in the sidebar. Blocked everywhere until time's "
              "up or you switch it off."],
+        ],
+    },
+    "click_highlight": {
+        "name": "Click Highlighter",
+        "description": "Flashes a ring where you click, so you never lose the cursor.",
+        "options": [
+            {"key": "big_cursor", "label": "Large cursor",
+             "info": "Switches Windows to its large high-contrast pointer "
+                     "while this is on, everywhere on your screen."},
+        ],
+        "shortcuts": [],
+        "instructions": [
+            ["Turn it on", "Use the switch in the sidebar."],
+            ["Click anywhere", "A ring flashes right where you clicked."],
+            ["Turn on the large cursor",
+             "Optional — makes the pointer itself bigger too."],
         ],
     },
 }
@@ -378,6 +395,8 @@ class Api:
             # Feature's already on — reapply immediately with the new font
             # instead of waiting for the next toggle.
             self._apply_dyslexia_toggle(True)
+        elif feature_id == "click_highlight" and key == "big_cursor" and self._is_running(feature_id):
+            self._apply_big_cursor(bool(value))
         return settings
 
     def _is_running(self, feature_id: str) -> bool:
@@ -465,6 +484,10 @@ class Api:
             self._apply_focus_toggle(turning_on)
         elif feature_id == "dyslexia_font":
             self._apply_dyslexia_toggle(turning_on)
+        elif feature_id == "click_highlight":
+            settings = store.load(feature_id)
+            if settings.get("big_cursor"):
+                self._apply_big_cursor(turning_on)
 
     def _apply_dyslexia_toggle(self, turning_on: bool):
         """Windows app-font substitution now follows the sidebar switch
@@ -483,6 +506,30 @@ class Api:
         except Exception as e:
             safe_print(f"[hub] dyslexia font toggle failed: {e}", flush=True)
             self._notice = f"Dyslexia Font: {e}"
+
+    def _apply_big_cursor(self, enabled: bool):
+        """Windows' large-pointer scheme, applied from here (not the
+        subprocess) for the same reason as focus_mode/colorblind_filter:
+        Popen.terminate() on Windows is TerminateProcess with no signal
+        delivery, so a subprocess-side restore-on-shutdown handler never
+        runs when the hub stops it — the registry write has to happen from
+        the process guaranteed to still be alive when the toggle flips.
+        """
+        if not plat.IS_WINDOWS:
+            return
+        try:
+            import ctypes
+            import winreg
+
+            size = "96" if enabled else "32"
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors",
+                                    0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                winreg.SetValueEx(key, "CursorBaseSize", 0, winreg.REG_SZ, size)
+            SPI_SETCURSORS = 0x0057
+            ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
+        except Exception as e:
+            safe_print(f"[hub] big cursor apply failed: {e}", flush=True)
+            self._notice = f"Click Highlighter: {e}"
 
     def _apply_focus_toggle(self, turning_on: bool):
         try:
