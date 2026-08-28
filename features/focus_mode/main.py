@@ -277,15 +277,21 @@ class FocusModeApp:
         self._sched.after(WATCH_MS, self._watch_settings)
 
     def _cleanup_stale_block(self):
-        """Clear a block left over from a previous crash if we're not resuming it."""
+        """Clear a block left over from a previous crash if we're not resuming it.
+
+        Must go through remove_block()'s own elevation path, not just
+        is_admin() — most launches aren't elevated, so gating on is_admin()
+        alone meant a crash-left block only ever healed itself on an
+        elevated run, leaving sites blocked indefinitely otherwise.
+        """
         try:
             has_block = HOSTS_PATH.exists() and MARK_BEGIN in HOSTS_PATH.read_text(
                 encoding="utf-8", errors="ignore")
-            if has_block and not self.settings.get("active") and is_admin():
+            if has_block and not self.settings.get("active"):
                 remove_block()
                 log("cleared stale block from a previous session")
         except Exception as e:
-            log(f"stale-block cleanup skipped: {e}")
+            log(f"stale-block cleanup failed: {e}")
 
     # ── session lifecycle ──
     def _begin_session(self, resuming: bool = False):
