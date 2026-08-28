@@ -53,7 +53,7 @@ STATE_FILE = ROOT / "hub_state.json"     # toggles + text scale
 STDERR_KEEP_LINES = 25                   # tail kept per feature, to explain a crash
 
 FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader", "dyslexia_font",
-                 "colorblind_filter", "focus_mode", "click_highlight"]
+                 "colorblind_filter", "focus_mode", "cursor_size"]
 
 # One entry per feature: display copy, settings-sheet options/shortcuts (with
 # the info-popup text for each), the numbered instructions shown on its page,
@@ -176,20 +176,16 @@ FEATURE_DATA = {
              "up or you switch it off."],
         ],
     },
-    "click_highlight": {
-        "name": "Click Highlighter",
-        "description": "Flashes a ring where you click, so you never lose the cursor.",
-        "options": [
-            {"key": "big_cursor", "label": "Large cursor",
-             "info": "Switches Windows to its large high-contrast pointer "
-                     "while this is on, everywhere on your screen."},
-        ],
+    "cursor_size": {
+        "name": "Cursor Size",
+        "description": "Makes your mouse pointer bigger or smaller, everywhere.",
+        "options": [],
         "shortcuts": [],
+        "settings_panel": "cursor",
         "instructions": [
             ["Turn it on", "Use the switch in the sidebar."],
-            ["Click anywhere", "A ring flashes right where you clicked."],
-            ["Turn on the large cursor",
-             "Optional — makes the pointer itself bigger too."],
+            ["Pick a size", "Use +/- below — 1 is normal, 15 is largest."],
+            ["Turn it off", "Puts the pointer back to its normal size."],
         ],
     },
 }
@@ -371,6 +367,8 @@ class Api:
                 return {"isAdmin": fm.is_admin()}
             except Exception as e:
                 return {"isAdmin": False, "error": str(e)}
+        if feature_id == "cursor_size":
+            return {"isWindows": plat.IS_WINDOWS}
         return {}
 
     def get_screening(self) -> dict:
@@ -395,8 +393,8 @@ class Api:
             # Feature's already on — reapply immediately with the new font
             # instead of waiting for the next toggle.
             self._apply_dyslexia_toggle(True)
-        elif feature_id == "click_highlight" and key == "big_cursor" and self._is_running(feature_id):
-            self._apply_big_cursor(bool(value))
+        elif feature_id == "cursor_size" and key == "size" and self._is_running(feature_id):
+            self._apply_cursor_size(int(value))
         return settings
 
     def _is_running(self, feature_id: str) -> bool:
@@ -484,10 +482,9 @@ class Api:
             self._apply_focus_toggle(turning_on)
         elif feature_id == "dyslexia_font":
             self._apply_dyslexia_toggle(turning_on)
-        elif feature_id == "click_highlight":
+        elif feature_id == "cursor_size":
             settings = store.load(feature_id)
-            if settings.get("big_cursor"):
-                self._apply_big_cursor(turning_on)
+            self._apply_cursor_size(int(settings.get("size", 1)) if turning_on else 1)
 
     def _apply_dyslexia_toggle(self, turning_on: bool):
         """Windows app-font substitution now follows the sidebar switch
@@ -507,29 +504,38 @@ class Api:
             safe_print(f"[hub] dyslexia font toggle failed: {e}", flush=True)
             self._notice = f"Dyslexia Font: {e}"
 
-    def _apply_big_cursor(self, enabled: bool):
-        """Windows' large-pointer scheme, applied from here (not the
+    def _apply_cursor_size(self, size: int):
+        """Windows' pointer-size slider, applied from here (not the
         subprocess) for the same reason as focus_mode/colorblind_filter:
         Popen.terminate() on Windows is TerminateProcess with no signal
         delivery, so a subprocess-side restore-on-shutdown handler never
         runs when the hub stops it — the registry write has to happen from
         the process guaranteed to still be alive when the toggle flips.
+
+        Two keys, matching what Settings > Accessibility > Mouse pointer
+        writes: Accessibility\\CursorSize holds the UI's 1-15 slider value,
+        Cursors\\CursorBaseSize is the derived pixel size Windows actually
+        renders at (32 + 16 * (size - 1)).
         """
         if not plat.IS_WINDOWS:
             return
+        size = max(1, min(15, int(size)))
         try:
             import ctypes
             import winreg
 
-            size = "96" if enabled else "32"
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Accessibility",
+                                    0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                winreg.SetValueEx(key, "CursorSize", 0, winreg.REG_DWORD, size)
+            base_px = 32 + 16 * (size - 1)
             with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors",
                                     0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
-                winreg.SetValueEx(key, "CursorBaseSize", 0, winreg.REG_SZ, size)
+                winreg.SetValueEx(key, "CursorBaseSize", 0, winreg.REG_SZ, str(base_px))
             SPI_SETCURSORS = 0x0057
             ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
         except Exception as e:
-            safe_print(f"[hub] big cursor apply failed: {e}", flush=True)
-            self._notice = f"Click Highlighter: {e}"
+            safe_print(f"[hub] cursor size apply failed: {e}", flush=True)
+            self._notice = f"Cursor Size: {e}"
 
     def _apply_focus_toggle(self, turning_on: bool):
         try:

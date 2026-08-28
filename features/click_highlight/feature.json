@@ -1,7 +1,0 @@
-{
-  "name": "Click Highlighter",
-  "description": "Flashes a ring where you click, with an optional large high-contrast cursor.",
-  "entry": "main.py",
-  "version": "0.1.0",
-  "author": "Accessibility4all"
-}

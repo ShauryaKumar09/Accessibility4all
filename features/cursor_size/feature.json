@@ -1,0 +1,7 @@
+{
+  "name": "Cursor Size",
+  "description": "Scales your mouse pointer up or down, system-wide.",
+  "entry": "main.py",
+  "version": "0.1.0",
+  "author": "Accessibility4all"
+}

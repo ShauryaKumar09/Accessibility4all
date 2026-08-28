@@ -133,6 +133,7 @@ async function renderFeaturePage(main, feat) {
     if (feat.settingsPanel === "dyslexia") renderDyslexiaPanel(panelHost, feat, settings, panelData, on);
     else if (feat.settingsPanel === "colorblind") renderColorblindPanel(panelHost, feat, settings, panelData);
     else if (feat.settingsPanel === "focus") renderFocusPanel(panelHost, feat, settings, panelData);
+    else if (feat.settingsPanel === "cursor") renderCursorPanel(panelHost, feat, settings, panelData);
   }
 }
 
@@ -284,6 +285,19 @@ function renderFocusPanel(host, feat, settings, panelData) {
   renderStepper(document.getElementById("stepper-duration"), "Session length",
     duration, 5, 480, 5, v => `${Math.round(v)} min`,
     async v => { settings.duration_minutes = v; await api().save_setting(feat.id, "duration_minutes", v); });
+}
+
+function renderCursorPanel(host, feat, settings, panelData) {
+  const size = settings.size ?? 1;
+  host.innerHTML = `
+    <div class="settings-panel">
+      <div id="stepper-cursor-size"></div>
+      ${panelData.isWindows === false ? '<div class="small-note">Cursor size only works on Windows.</div>' : ""}
+    </div>
+  `;
+  renderStepper(document.getElementById("stepper-cursor-size"), "Pointer size",
+    size, 1, 15, 1, v => `${Math.round(v)} / 15`,
+    async v => { settings.size = v; await api().save_setting(feat.id, "size", v); });
 }
 
 function renderStepper(host, label, value, min, max, step, fmt, onChange) {
