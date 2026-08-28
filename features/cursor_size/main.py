@@ -48,6 +48,29 @@ def log(msg: str):
     console.safe_print(f"[cursor_size] {msg}", flush=True)
 
 
+def _read_registry_state():
+    """Read back the two registry values hub.py's _apply_cursor_size writes,
+    for correlation with the hub's own apply_result log line."""
+    if not plat.IS_WINDOWS:
+        return None, None
+    import winreg
+    cursor_size = None
+    base_size = None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Accessibility",
+                            0, winreg.KEY_READ) as key:
+            cursor_size, _ = winreg.QueryValueEx(key, "CursorSize")
+    except OSError:
+        pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors",
+                            0, winreg.KEY_READ) as key:
+            base_size, _ = winreg.QueryValueEx(key, "CursorBaseSize")
+    except OSError:
+        pass
+    return cursor_size, base_size
+
+
 def load_settings() -> dict:
     return store.load(FEATURE_ID)
 
@@ -71,6 +94,11 @@ class CursorSizeApp:
         self.bubble.run(self._on_started)
 
     def _on_started(self):
+        verified_cursor_size, verified_base_size = _read_registry_state()
+        console.log_event("cursor_size_subprocess", "on_started",
+                          settings_size=self.settings.get("size"),
+                          verified_cursor_size=verified_cursor_size,
+                          verified_base_size=verified_base_size)
         self._draw()
         save_settings(self.settings)
         self.bubble.place_stacked("cursor_size")
@@ -90,6 +118,11 @@ class CursorSizeApp:
         if self._watcher.changed():
             self.settings = load_settings()
             log(f"settings changed in the hub — {self._label()}")
+            verified_cursor_size, verified_base_size = _read_registry_state()
+            console.log_event("cursor_size_subprocess", "watch_settings_apply",
+                              settings_size=self.settings.get("size"),
+                              verified_cursor_size=verified_cursor_size,
+                              verified_base_size=verified_base_size)
             self._draw()
             self.bubble.place_stacked("cursor_size")
             self.bubble.show(for_ms=SHOW_MS)

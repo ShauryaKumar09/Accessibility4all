@@ -141,7 +141,16 @@ def set_filter(enabled: bool, filter_type: int):
     _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active", 1 if enabled else 0)
     _set_registry_string(winreg.HKEY_CURRENT_USER, ACCESSIBILITY_PATH, "Configuration",
                          "colorfiltering" if enabled else "")
-    if is_filter_active() != enabled:
+    readback_active = _read_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active")
+    readback_filter_type = _read_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType")
+    verified = is_filter_active()
+    console.log_event("colorblind_filter", "set_filter", requested_enabled=enabled,
+                      requested_filter_type=filter_type,
+                      written_active=1 if enabled else 0,
+                      readback_active=readback_active,
+                      readback_filter_type=readback_filter_type,
+                      is_filter_active_result=verified)
+    if verified != enabled:
         raise RuntimeError("Registry updated but Windows did not confirm the new state.")
 
 
@@ -162,6 +171,8 @@ class ColorblindFilterApp:
         self.bubble.run(self._on_started)
 
     def _on_started(self):
+        console.log_event("colorblind_subprocess", "apply_start", trigger="on_started",
+                          settings=self.settings)
         self._apply_and_draw()
         save_settings(self.settings)
         self.bubble.place_stacked("colorblind_filter")
@@ -194,6 +205,8 @@ class ColorblindFilterApp:
         if self._watcher.changed():
             self.settings = load_settings()
             log(f"settings changed in the hub — {self._label()}")
+            console.log_event("colorblind_subprocess", "apply_start", trigger="watch_settings",
+                              settings=self.settings)
             self._apply_and_draw()
             self.bubble.place_stacked("colorblind_filter")
         self.bubble.show(for_ms=SHOW_MS)

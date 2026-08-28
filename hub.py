@@ -35,6 +35,7 @@ from pathlib import Path
 import webview
 from dotenv import load_dotenv
 
+from shared import console
 from shared.console import configure_stdio, safe_print
 from shared import hotkeys as hk
 from shared import platform as plat
@@ -424,12 +425,21 @@ class Api:
         return hk.pretty(spec)
 
     def _apply_colorblind_filter(self, settings: dict):
+        requested_enabled = bool(settings.get("enabled", False))
+        requested_filter = settings.get("filter_name", "Deuteranopia")
+        console.log_event("hub", "apply_start", feature="colorblind_filter",
+                          requested_enabled=requested_enabled,
+                          requested_filter=requested_filter)
         try:
             cf = _load_feature_module("colorblind_filter")
-            cf.set_filter(bool(settings.get("enabled", False)),
-                          FILTER_TYPES[settings.get("filter_name", "Deuteranopia")])
+            cf.set_filter(requested_enabled, FILTER_TYPES[requested_filter])
+            verified = cf.is_filter_active()
+            console.log_event("hub", "apply_result", feature="colorblind_filter",
+                              ok=True, verified_active=verified)
         except Exception as e:
             safe_print(f"[hub] colorblind filter apply failed: {e}", flush=True)
+            console.log_event("hub", "apply_result", feature="colorblind_filter",
+                              ok=False, error=str(e))
 
     # ── toggle / process control ──
     def get_state(self) -> dict:
@@ -444,6 +454,7 @@ class Api:
         with self._lock:
             running = feat.id in self._procs and self._procs[feat.id].poll() is None
             turning_on = not running
+            console.log_event("hub", "toggle", feature=feat.id, turning_on=turning_on)
             self._notice = ""
             # Settle settings.json + the actual filter/block BEFORE the
             # subprocess (re)starts, so its own startup read sees the final
@@ -492,17 +503,36 @@ class Api:
         (`website_enabled` stays its own toggle: it controls the Chrome
         extension, a genuinely different mechanism the user may want
         independent of whether Windows apps are substituted.)"""
+        font_name = None
+        targets = list(winfonts.SUBSTITUTION_TARGETS)
+        if turning_on:
+            settings = store.load("dyslexia_font")
+            font_name = settings.get("font_family") or winfonts.FONT_CHOICES[0]
+        console.log_event("hub", "apply_start", feature="dyslexia_font",
+                          turning_on=turning_on, font_name=font_name,
+                          target_count=len(targets))
         try:
             if turning_on:
-                settings = store.load("dyslexia_font")
-                font_name = settings.get("font_family") or winfonts.FONT_CHOICES[0]
-                winfonts.apply_windows_substitution(font_name, list(winfonts.SUBSTITUTION_TARGETS))
+                winfonts.apply_windows_substitution(font_name, targets)
             else:
                 if winfonts.BACKUP_FILE.exists():
                     winfonts.restore_windows_substitution()
+            verified_value = None
+            if targets:
+                try:
+                    import winreg
+                    verified_value = winfonts._read_registry_string(
+                        winreg.HKEY_CURRENT_USER, winfonts.FONT_SUBSTITUTES_PATH, targets[0])
+                except Exception:
+                    verified_value = None
+            console.log_event("hub", "apply_result", feature="dyslexia_font",
+                              ok=True, sample_target=targets[0] if targets else None,
+                              verified_value=verified_value)
         except Exception as e:
             safe_print(f"[hub] dyslexia font toggle failed: {e}", flush=True)
             self._notice = f"Dyslexia Font: {e}"
+            console.log_event("hub", "apply_result", feature="dyslexia_font",
+                              ok=False, error=str(e))
 
     def _apply_cursor_size(self, size: int):
         """Windows' pointer-size slider, applied from here (not the
@@ -520,6 +550,7 @@ class Api:
         if not plat.IS_WINDOWS:
             return
         size = max(1, min(15, int(size)))
+        console.log_event("hub", "apply_start", feature="cursor_size", requested_size=size)
         try:
             import ctypes
             import winreg
@@ -533,31 +564,71 @@ class Api:
                 winreg.SetValueEx(key, "CursorBaseSize", 0, winreg.REG_SZ, str(base_px))
             SPI_SETCURSORS = 0x0057
             ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
+
+            verified_cursor_size = None
+            verified_base_size = None
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Accessibility",
+                                    0, winreg.KEY_READ) as key:
+                    verified_cursor_size, _ = winreg.QueryValueEx(key, "CursorSize")
+            except OSError:
+                pass
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors",
+                                    0, winreg.KEY_READ) as key:
+                    verified_base_size, _ = winreg.QueryValueEx(key, "CursorBaseSize")
+            except OSError:
+                pass
+            console.log_event("hub", "apply_result", feature="cursor_size", ok=True,
+                              requested_size=size, requested_base_px=base_px,
+                              verified_cursor_size=verified_cursor_size,
+                              verified_base_size=verified_base_size)
         except Exception as e:
             safe_print(f"[hub] cursor size apply failed: {e}", flush=True)
             self._notice = f"Cursor Size: {e}"
+            console.log_event("hub", "apply_result", feature="cursor_size", ok=False,
+                              requested_size=size, error=str(e))
 
     def _apply_focus_toggle(self, turning_on: bool):
+        fm = None
+        domains = []
         try:
             fm = _load_feature_module("focus_mode")
             settings = store.load("focus_mode")
             if turning_on:
                 domains = settings.get("blocklist", [])
+                console.log_event("hub", "apply_start", feature="focus_mode",
+                                  turning_on=True, domains=domains)
                 if not domains:
                     self._notice = "Focus Mode: add a site to block first."
+                    console.log_event("hub", "apply_result", feature="focus_mode",
+                                      ok=False, error="no domains in blocklist")
                     return
+                was_admin = fm.is_admin()
                 fm.apply_block(domains)
                 settings["active"] = True
                 settings["end_time"] = time.time() + int(
                     settings.get("duration_minutes", 25)) * 60
             else:
+                console.log_event("hub", "apply_start", feature="focus_mode",
+                                  turning_on=False, domains=domains)
+                was_admin = fm.is_admin()
                 fm.remove_block()
                 settings["active"] = False
                 settings["end_time"] = 0.0
             store.save("focus_mode", settings)
+            hosts_text = fm.HOSTS_PATH.read_text(encoding="utf-8", errors="ignore") \
+                if fm.HOSTS_PATH.exists() else ""
+            marker_present = fm.MARK_BEGIN in hosts_text
+            console.log_event("hub", "apply_result", feature="focus_mode", ok=True,
+                              turning_on=turning_on, domains=domains,
+                              was_admin=was_admin, needed_elevation=not was_admin,
+                              marker_present_in_hosts=marker_present)
         except Exception as e:
             safe_print(f"[hub] focus mode toggle failed: {e}", flush=True)
             self._notice = f"Focus Mode: {e}"
+            console.log_event("hub", "apply_result", feature="focus_mode", ok=False,
+                              turning_on=turning_on, domains=domains, error=str(e))
 
     def _start(self, feat: Feature):
         if feat.id in self._procs and self._procs[feat.id].poll() is None:

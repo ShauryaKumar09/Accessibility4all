@@ -209,11 +209,29 @@ def _elevate_hosts_action(action: str, domains: list[str] | None):
         raise PermissionError("Run as root to block or unblock sites.")
 
 
+def _marker_present() -> bool:
+    try:
+        return HOSTS_PATH.exists() and MARK_BEGIN in HOSTS_PATH.read_text(
+            encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+
+
 def apply_block(domains: list[str]):
-    if not is_admin():
-        _elevate_hosts_action("apply", domains)
-        return
-    _write_apply(domains)
+    needed_elevation = not is_admin()
+    try:
+        if needed_elevation:
+            _elevate_hosts_action("apply", domains)
+        else:
+            _write_apply(domains)
+        console.log_event("focus_mode", "apply_block", domains=domains,
+                          needed_elevation=needed_elevation, ok=True,
+                          marker_present=_marker_present())
+    except Exception as e:
+        console.log_event("focus_mode", "apply_block", domains=domains,
+                          needed_elevation=needed_elevation, ok=False,
+                          error=str(e), marker_present=_marker_present())
+        raise
 
 
 def remove_block():
@@ -222,10 +240,20 @@ def remove_block():
     current = HOSTS_PATH.read_text(encoding="utf-8", errors="ignore")
     if MARK_BEGIN not in current:
         return
-    if not is_admin():
-        _elevate_hosts_action("remove", None)
-        return
-    _write_remove()
+    needed_elevation = not is_admin()
+    try:
+        if needed_elevation:
+            _elevate_hosts_action("remove", None)
+        else:
+            _write_remove()
+        console.log_event("focus_mode", "remove_block",
+                          needed_elevation=needed_elevation, ok=True,
+                          marker_present=_marker_present())
+    except Exception as e:
+        console.log_event("focus_mode", "remove_block",
+                          needed_elevation=needed_elevation, ok=False,
+                          error=str(e), marker_present=_marker_present())
+        raise
 
 
 def _run_elevated_worker(payload_path: str):
@@ -287,11 +315,14 @@ class FocusModeApp:
         try:
             has_block = HOSTS_PATH.exists() and MARK_BEGIN in HOSTS_PATH.read_text(
                 encoding="utf-8", errors="ignore")
+            console.log_event("focus_mode_subprocess", "cleanup_stale_block_check",
+                              has_block=has_block, settings_active=bool(self.settings.get("active")))
             if has_block and not self.settings.get("active"):
                 remove_block()
                 log("cleared stale block from a previous session")
         except Exception as e:
             log(f"stale-block cleanup failed: {e}")
+            console.log_event("focus_mode_subprocess", "cleanup_stale_block_failed", error=str(e))
 
     # ── session lifecycle ──
     def _begin_session(self, resuming: bool = False):
@@ -302,6 +333,8 @@ class FocusModeApp:
             end_time = time.time() + minutes * 60
         already_blocked = HOSTS_PATH.exists() and MARK_BEGIN in HOSTS_PATH.read_text(
             encoding="utf-8", errors="ignore")
+        console.log_event("focus_mode_subprocess", "begin_session", resuming=resuming,
+                          domains=domains, already_blocked=already_blocked)
         if not already_blocked:
             # The hub applies the block itself before this process even
             # starts (see hub.py's _apply_focus_toggle) — skip a redundant

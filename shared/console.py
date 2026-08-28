@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import time
+from pathlib import Path
 
 _configured = False
+_LOG_FILE = Path(__file__).resolve().parent.parent / "apply_log.jsonl"
 
 
 def configure_stdio() -> None:
@@ -34,3 +38,21 @@ def safe_print(*args, sep: str = " ", end: str = "\n", flush: bool = False) -> N
         sys.stdout.buffer.write(text.encode(enc, errors="replace"))
         if flush:
             sys.stdout.flush()
+
+
+def log_event(source: str, action: str, **fields) -> None:
+    """Append one structured, timestamped record to apply_log.jsonl.
+
+    For features that write OS state directly (registry, hosts file) the
+    hub's own terminal scrolls away and is per-process, so this is the one
+    place to look when a toggle claimed to apply but the machine didn't
+    visibly change — every apply/verify call logs what it asked for and
+    what it actually read back.
+    """
+    record = {"ts": time.time(), "pid": __import__("os").getpid(),
+              "source": source, "action": action, **fields}
+    try:
+        with open(_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
