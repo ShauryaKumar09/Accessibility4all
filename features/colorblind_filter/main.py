@@ -7,16 +7,20 @@ state — see hub.py's `_apply_colorblind_filter`. This process draws one small
 pill confirming the current filter, and re-applies it on startup in case the
 setting changed while it wasn't running.
 
-Applies system-wide (not just Chrome) by driving Windows' own Ease of
-Access > Color Filters feature: set HKCU\\Software\\Microsoft\\ColorFiltering
-directly (see `set_filter()` below for why a live-toggle shortcut isn't used).
+Applies system-wide (not just Chrome) by driving the OS's own colour-filter
+feature: on Windows the Ease of Access filter, toggled with its real
+Win+Ctrl+C shortcut because a registry write alone does not repaint the
+screen (see `_set_filter_windows`); on macOS the Accessibility Color Filters
+checkbox, scripted as a best effort since Apple exposes no API for it.
 See features/README.md.
 """
 
 from __future__ import annotations
 
 import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 FEATURE_DIR = Path(__file__).resolve().parent
@@ -33,6 +37,10 @@ console.configure_stdio()
 FEATURE_ID = "colorblind_filter"
 COLOR_FILTERING_PATH = r"Software\Microsoft\ColorFiltering"
 ACCESSIBILITY_PATH = r"Software\Microsoft\Windows NT\CurrentVersion\Accessibility"
+
+# How long to wait for Windows to write `Active` back after the shortcut fires.
+TOGGLE_SETTLE_S = 1.5
+TOGGLE_POLL_S = 0.05
 
 FILTER_TYPES = {
     "Deuteranopia": 3,
@@ -106,52 +114,162 @@ def _set_registry_string(root, path: str, name: str, value: str):
         winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
 
 
+def _remember_mac_state(enabled: bool):
+    """macOS gives us nothing to read back, so record what we last applied."""
+    settings = load_settings()
+    settings["_mac_applied_on"] = bool(enabled)
+    save_settings(settings)
+
+
 def is_filter_active() -> bool:
-    if not plat.IS_WINDOWS:
-        return False
+    """Whether the filter is on right now.
+
+    On Windows this reads `Active`, which is truthful precisely because
+    `_set_filter_windows` never writes it — only the OS shortcut does.
+    macOS has no equivalent readback, so we fall back to what we last
+    applied ourselves.
+    """
+    if plat.IS_WINDOWS:
+        import winreg
+
+        return bool(_read_registry_dword(winreg.HKEY_CURRENT_USER,
+                                         COLOR_FILTERING_PATH, "Active"))
+    if plat.IS_MAC:
+        return bool(load_settings().get("_mac_applied_on", False))
+    return False
+
+
+def _press_toggle_shortcut():
+    """Fire Windows' own Win+Ctrl+C color-filter shortcut.
+
+    This is the ONLY thing that changes the filter live. Writing
+    `ColorFiltering\\Active` by hand updates what Windows will use at its
+    next sync point but does not repaint the screen — Microsoft's docs say
+    a sign-out is required for a registry-only change, and a real user hit
+    exactly that: the registry read back "off" while the screen was still
+    grey, and stayed grey until this shortcut was pressed.
+    """
+    import pyautogui
+
+    pyautogui.hotkey("win", "ctrl", "c")
+
+
+def _wait_for_active(target: bool) -> bool:
+    """Wait for Windows to write `Active` back after the shortcut fired."""
+    deadline = time.monotonic() + TOGGLE_SETTLE_S
+    while time.monotonic() < deadline:
+        if is_filter_active() == target:
+            return True
+        time.sleep(TOGGLE_POLL_S)
+    return is_filter_active() == target
+
+
+def _set_filter_windows(enabled: bool, filter_type: int):
+    """Drive Windows' real color-filter toggle, then verify it took.
+
+    Deliberately does NOT write `Active` itself. Because the OS shortcut is
+    the only thing that changes it, `Active` stays a truthful mirror of what
+    is actually on screen — which is what keeps this in sync. Writing it
+    directly is what desynced a real user into a stuck-grey screen: the app
+    set it to 0, the screen stayed on, and every later toggle reasoned from
+    a value that no longer described reality.
+
+    Known limitation: if the filter is toggled outside this app (Windows
+    Settings, or the user pressing Win+Ctrl+C themselves) between our read
+    and our keypress, we can still flip the wrong way. Windows exposes no
+    live "is the filter painting right now" signal to close that window.
+    """
     import winreg
 
-    return bool(_read_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active"))
+    # Off by default on a fresh Windows install — without this the shortcut
+    # below does nothing at all, which is the difference between "works on
+    # my machine" and "works on the machine we ship to".
+    _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "HotkeyEnabled", 1)
+    # Safe to write directly: it only says WHICH filter, and is read when the
+    # filter turns on.
+    _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType", filter_type)
+    _set_registry_string(winreg.HKEY_CURRENT_USER, ACCESSIBILITY_PATH, "Configuration",
+                         "colorfiltering" if enabled else "")
+
+    was_active = is_filter_active()
+    presses = 0
+    if enabled and was_active:
+        # Already on, but the type may have just changed — a running filter
+        # does not re-read FilterType, so cycle it off and back on. This is
+        # the fix for "I clicked through every filter and nothing changed".
+        _press_toggle_shortcut()
+        _wait_for_active(False)
+        _press_toggle_shortcut()
+        presses = 2
+    elif was_active != enabled:
+        _press_toggle_shortcut()
+        presses = 1
+
+    verified = _wait_for_active(enabled) if presses else (was_active == enabled)
+    console.log_event("colorblind_filter", "set_filter", platform="windows",
+                      requested_enabled=enabled, requested_filter_type=filter_type,
+                      was_active=was_active, shortcut_presses=presses,
+                      verified_active=is_filter_active(), ok=verified)
+    if not verified:
+        raise RuntimeError(
+            "Windows did not apply the color filter. Check that Color Filters "
+            "are allowed in Settings > Accessibility > Color filters.")
+
+
+def _set_filter_mac(enabled: bool, filter_type_name: str):
+    """Toggle macOS' Color Filters checkbox by scripting System Settings.
+
+    BEST EFFORT, AND UNVERIFIED ON REAL HARDWARE. macOS exposes no public
+    API for this: there is no documented `defaults` key, and Option-Cmd-F5
+    opens the Accessibility Shortcuts panel rather than toggling the filter.
+    UI scripting is what other tools resort to, and it breaks whenever Apple
+    rearranges System Settings — so treat a failure here as "Apple moved the
+    checkbox", not as a bug in the caller.
+
+    Requires the user to grant Accessibility permission to whatever runs
+    Python (System Settings > Privacy & Security > Accessibility).
+    """
+    want = "true" if enabled else "false"
+    script = f'''
+    tell application "System Settings"
+        activate
+        delay 0.6
+        reveal anchor "Seeing_ColorFilters" of pane id "com.apple.preference.universalaccess"
+    end tell
+    delay 1.0
+    tell application "System Events"
+        tell process "System Settings"
+            repeat with cb in (every checkbox of entire contents of window 1)
+                if (value of cb as boolean) is not {want} then
+                    click cb
+                end if
+                exit repeat
+            end repeat
+        end tell
+    end tell
+    tell application "System Settings" to quit
+    '''
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    ok = result.returncode == 0
+    console.log_event("colorblind_filter", "set_filter", platform="mac",
+                      requested_enabled=enabled, filter_type_name=filter_type_name,
+                      ok=ok, error=(result.stderr or "").strip() or None)
+    if not ok:
+        raise RuntimeError(
+            "Could not toggle Color Filters. Grant Accessibility permission to "
+            "Python in System Settings > Privacy & Security > Accessibility.")
+    _remember_mac_state(enabled)
 
 
 def set_filter(enabled: bool, filter_type: int):
-    """Write both registry locations Windows tracks for color filters.
-
-    `ColorFiltering\\Active`/`FilterType` alone is not enough — Windows also
-    tracks which assistive feature is active in `...\\Accessibility`'s
-    `Configuration` string (`"colorfiltering"` when on, `""` when off).
-    Writing only the first location left the filter invisible until a
-    lock/unlock and every filter type looking identical, which is the exact
-    bug a real user hit — Windows' own color-filter `.reg` exports touch
-    both keys, confirmed via research.
-
-    `atbroker.exe /colorfiltershortcut` (simulating the Win+Ctrl+C shortcut,
-    tried with and without the `/resettransferkeys` flag) reliably returns
-    exit code 1 and does nothing in this environment — re-tested live in a
-    real interactive session, not just the earlier sandboxed one, same
-    result both times. Not used: it's also a TOGGLE relative to Windows'
-    own internal state, so even if it worked, calling it after we've just
-    written the correct Active value risks flipping it right back off.
-    """
-    if not plat.IS_WINDOWS:
-        raise RuntimeError("Color filters are only available on Windows.")
-    import winreg
-
-    _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType", filter_type)
-    _set_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active", 1 if enabled else 0)
-    _set_registry_string(winreg.HKEY_CURRENT_USER, ACCESSIBILITY_PATH, "Configuration",
-                         "colorfiltering" if enabled else "")
-    readback_active = _read_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "Active")
-    readback_filter_type = _read_registry_dword(winreg.HKEY_CURRENT_USER, COLOR_FILTERING_PATH, "FilterType")
-    verified = is_filter_active()
-    console.log_event("colorblind_filter", "set_filter", requested_enabled=enabled,
-                      requested_filter_type=filter_type,
-                      written_active=1 if enabled else 0,
-                      readback_active=readback_active,
-                      readback_filter_type=readback_filter_type,
-                      is_filter_active_result=verified)
-    if verified != enabled:
-        raise RuntimeError("Registry updated but Windows did not confirm the new state.")
+    """Apply the colour filter on whichever OS we are on."""
+    if plat.IS_WINDOWS:
+        _set_filter_windows(enabled, filter_type)
+    elif plat.IS_MAC:
+        name = next((n for n, v in FILTER_TYPES.items() if v == filter_type), "Grayscale")
+        _set_filter_mac(enabled, name)
+    else:
+        raise RuntimeError("Color filters are only available on Windows and macOS.")
 
 
 class ColorblindFilterApp:
@@ -171,45 +289,36 @@ class ColorblindFilterApp:
         self.bubble.run(self._on_started)
 
     def _on_started(self):
-        console.log_event("colorblind_subprocess", "apply_start", trigger="on_started",
-                          settings=self.settings)
-        self._apply_and_draw()
-        save_settings(self.settings)
+        console.log_event("colorblind_subprocess", "on_started", settings=self.settings)
+        self._draw()
         self.bubble.place_stacked("colorblind_filter")
         self.bubble.show(for_ms=SHOW_MS)
         self._sched.after(WATCH_MS, self._watch_settings)
 
     def _label(self) -> str:
-        if not plat.IS_WINDOWS:
-            return "Windows only"
+        if not (plat.IS_WINDOWS or plat.IS_MAC):
+            return "Not supported here"
         if not self.settings.get("enabled"):
             return "Filter off"
         return f"Filter: {self.settings.get('filter_name', 'Deuteranopia')}"
 
     def _draw(self):
-        on = bool(plat.IS_WINDOWS and self.settings.get("enabled"))
+        on = bool((plat.IS_WINDOWS or plat.IS_MAC) and self.settings.get("enabled"))
         self.bubble.set_text("label", self._label())
         self.bubble.set_style("dot", "background",
                               C["ON"] if on else C["DOT_IDLE"])
 
-    def _apply_and_draw(self):
-        if plat.IS_WINDOWS:
-            try:
-                set_filter(bool(self.settings.get("enabled", False)),
-                          FILTER_TYPES[self.settings.get("filter_name", "Deuteranopia")])
-            except Exception as e:
-                log(f"apply failed: {e}")
-        self._draw()
-
     def _watch_settings(self):
+        # Display only. The hub owns every call to set_filter() — applying
+        # from here too would fight it, and since turning the filter on is a
+        # real keystroke to the OS, a second apply visibly flickers the
+        # screen off and back on.
         if self._watcher.changed():
             self.settings = load_settings()
             log(f"settings changed in the hub — {self._label()}")
-            console.log_event("colorblind_subprocess", "apply_start", trigger="watch_settings",
-                              settings=self.settings)
-            self._apply_and_draw()
+            self._draw()
             self.bubble.place_stacked("colorblind_filter")
-        self.bubble.show(for_ms=SHOW_MS)
+            self.bubble.show(for_ms=SHOW_MS)
         self._sched.after(WATCH_MS, self._watch_settings)
 
     def _shutdown(self, *_args):

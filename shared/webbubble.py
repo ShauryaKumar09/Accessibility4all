@@ -321,8 +321,31 @@ class Bubble:
                 self.window.show()
             except Exception:
                 pass
+        self._raise_above_everything()
         if for_ms and self._sched:
             self._hide_at = self._sched.after(for_ms, self.hide)
+
+    def _raise_above_everything(self):
+        """Put this bubble back on top of the other always-on-top windows.
+
+        `on_top=True` at creation is not enough. Windows orders topmost
+        windows by which was most recently made topmost, so a bubble created
+        early loses to anything topmost'd after it — the hub itself, or
+        another feature's bubble — and ends up buried, which is exactly what
+        users saw.
+
+        The flip to False and back is deliberate: WinForms' `TopMost` setter
+        short-circuits when the value has not changed, so re-setting True on
+        a window that already believes it is topmost does nothing at all.
+        Changing it twice forces the real z-order call. pywebview implements
+        `on_top` on both the Windows and macOS backends, so this needs no
+        platform branch.
+        """
+        try:
+            self.window.on_top = False
+            self.window.on_top = True
+        except Exception:
+            pass          # the window is going away; z-order no longer matters
 
     def hide(self):
         """Fade out, then take the window away once the fade has played."""
@@ -363,6 +386,17 @@ class Bubble:
         sw, sh = screen_size()
         self.move(max(0, (sw - self.w) // 2), max(0, sh - self.h - bottom_gap))
 
+    def place_bottom_right(self, bottom_gap: int = BOTTOM_GAP,
+                           side_gap: int = BOTTOM_GAP):
+        """Park the bubble in the bottom-right corner and leave it there.
+
+        For a card the user reads rather than glances at: a fixed corner is
+        predictable and never lands on top of the thing they were reading,
+        which is what following the pointer did.
+        """
+        sw, sh = screen_size()
+        self.move(max(0, sw - self.w - side_gap), max(0, sh - self.h - bottom_gap))
+
     def place_stacked(self, feature_id: str):
         """Bottom-centre, but above any bubble that is already down there.
 
@@ -379,6 +413,12 @@ class Bubble:
                 break
             info = presence.get(other)
             if not info or not feature_bus.is_feature_running(other):
+                continue
+            if "started_at" not in info:
+                # Written by a build before presence carried a timestamp, or
+                # left behind by a process that died without cleaning up. The
+                # PID check above can be fooled by PID reuse, so an entry we
+                # cannot date is not trustworthy enough to stack against.
                 continue
             win = info.get("window") or {}
             if "y" in win and "h" in win:

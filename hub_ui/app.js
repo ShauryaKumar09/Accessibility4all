@@ -90,6 +90,15 @@ function renderHome(main) {
     <h1 class="page-title">Turn on the help you need.</h1>
     <p class="page-sub">Click a feature to see how it works, or flip it on right here.</p>
     <div class="home-grid" id="home-grid"></div>
+    <div class="startup-row" id="startup-row" hidden>
+      <div>
+        <div class="startup-label">Start when I log in</div>
+        <div class="startup-sub">Opens automatically with the features you left on.</div>
+      </div>
+      <button class="switch" id="startup-switch" role="switch" aria-checked="false">
+        <span class="knob"></span>
+      </button>
+    </div>
   `;
   const grid = document.getElementById("home-grid");
   for (const feat of FEATURES) {
@@ -104,6 +113,34 @@ function renderHome(main) {
     card.addEventListener("click", () => navigate(feat.id));
     grid.appendChild(card);
   }
+  renderStartupToggle();
+}
+
+async function renderStartupToggle() {
+  const row = document.getElementById("startup-row");
+  const sw = document.getElementById("startup-switch");
+  if (!row || !sw) return;
+  let state;
+  try {
+    state = await api().get_launch_at_startup();
+  } catch (e) {
+    return;                       // not supported here; leave the row hidden
+  }
+  if (!state || !state.supported) return;
+  row.hidden = false;
+  const paint = on => {
+    sw.classList.toggle("on", !!on);
+    sw.setAttribute("aria-checked", on ? "true" : "false");
+  };
+  paint(state.enabled);
+  sw.addEventListener("click", async () => {
+    const next = !sw.classList.contains("on");
+    paint(next);                  // optimistic, corrected below if it failed
+    const res = await api().set_launch_at_startup(next);
+    paint(res && res.enabled);
+    STATE = await api().get_state();
+    renderSidebar();              // surfaces the error notice if it failed
+  });
 }
 
 /* ── feature page ────────────────────────────────────────────────────── */
@@ -231,8 +268,14 @@ function renderDyslexiaPanel(host, feat, settings, panelData, on) {
   for (const f of panelData.fontChoices || []) {
     const card = document.createElement("div");
     card.className = "font-card" + (settings.font_family === f.name ? " selected" : "");
-    card.innerHTML = `<div class="fname">${escapeHtml(f.name)}</div><div class="fnote">${escapeHtml(f.note)}</div>`;
+    const missing = f.installed === false;
+    if (missing) card.className += " unavailable";
+    const note = missing ? "Not installed on this PC" : f.note;
+    card.innerHTML = `<div class="fname">${escapeHtml(f.name)}</div><div class="fnote">${escapeHtml(note)}</div>`;
     card.addEventListener("click", async () => {
+      // Selecting a font that isn't installed used to fail silently, which
+      // looked like the whole feature was broken.
+      if (missing) return;
       settings.font_family = f.name;
       await api().save_setting(feat.id, "font_family", f.name);
       renderDyslexiaPanel(host, feat, settings, panelData, on);

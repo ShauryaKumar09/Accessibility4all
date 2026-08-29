@@ -94,7 +94,6 @@ REC = C["STOP_BORDER"]
 CARD_W = 400
 CARD_PAD_X, CARD_PAD_Y = 22, 20
 CARD_GAP = 12
-MARGIN = 12
 SETTINGS_WATCH_MS = 700
 # Three named sizes replace the old free-form spinbox.
 TEXT_SIZES = store.TONE_TEXT_SIZES
@@ -286,28 +285,23 @@ class ToneReaderApp:
             "document.getElementById('card').offsetHeight", self._card_h))
         self._card_h = height
         self.bubble.resize_content(CARD_W, height)
-        self._place_near_pointer(height)
+        self._place_card()
         self.bubble.show()
         self._visible = True
         self._ensure_mouse_listener()
 
-    def _place_near_pointer(self, height: int):
-        """Next to the selection — i.e. where the pointer is — clamped on screen."""
-        sw, sh = wb.screen_size()
-        try:
-            # pyautogui, pynput and the window manager all speak logical points
-            # on macOS, so the pointer position needs no Retina scaling here.
-            px, py = pyautogui.position()
-        except Exception:
-            px, py = sw // 2, sh // 2
-        w, h = self.bubble.w, self.bubble.h
-        x = min(max(MARGIN, px - w // 2), sw - w - MARGIN)
-        y = py + 24
-        if y + h > sh - MARGIN:
-            y = max(MARGIN, py - h - 24)
-        self.bubble.move(int(x), int(y))
+    def _place_card(self):
+        """Always the bottom-right corner.
+
+        This used to follow the pointer, which meant the card landed on top
+        of whatever the user had just been reading — and by the time it
+        appeared the mouse had usually moved somewhere unrelated, so it read
+        as popping up at random. A fixed corner is predictable and stays out
+        of the way of the text being explained.
+        """
+        self.bubble.place_bottom_right()
         self._bounds = (self.bubble.x, self.bubble.y,
-                        self.bubble.x + w, self.bubble.y + h)
+                        self.bubble.x + self.bubble.w, self.bubble.y + self.bubble.h)
         self._update_presence()
 
     def hide_card(self):

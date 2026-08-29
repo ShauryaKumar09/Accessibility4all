@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 
 from shared import console
 from shared.console import configure_stdio, safe_print
+from shared import autostart
 from shared import hotkeys as hk
 from shared import platform as plat
 from shared import pynput_darwin
@@ -147,6 +148,9 @@ FEATURE_DATA = {
             ["Adjust spacing", "Use +/- to space out letters and lines."],
             ["Browse normally",
              "Install the Chrome extension to carry your font to every page."],
+            ["Restart open apps",
+             "Windows apps pick the new font up when they start. Ones already "
+             "open keep the old one until you reopen them."],
             ["Take the screening test",
              "A short, non-diagnostic check further down this page."],
         ],
@@ -185,7 +189,8 @@ FEATURE_DATA = {
         "settings_panel": "cursor",
         "instructions": [
             ["Turn it on", "Use the switch in the sidebar."],
-            ["Pick a size", "Use +/- below — 1 is normal, 15 is largest."],
+            ["Pick a size", "Use +/- below — 1 is normal, 15 is largest. The "
+             "arrow resizes fully; the text and loading pointers may not."],
             ["Turn it off", "Puts the pointer back to its normal size."],
         ],
     },
@@ -301,7 +306,7 @@ def discover_features() -> list[Feature]:
 
 
 def load_state() -> dict:
-    state = {"enabled": [], "text_scale": 1.0}
+    state = {"enabled": [], "text_scale": 1.0, "launch_at_startup": False}
     if STATE_FILE.exists():
         try:
             loaded = json.loads(STATE_FILE.read_text())
@@ -312,11 +317,12 @@ def load_state() -> dict:
     return state
 
 
-def save_state(enabled: set[str], text_scale: float):
+def save_state(enabled: set[str], text_scale: float, launch_at_startup: bool = False):
     try:
         STATE_FILE.write_text(json.dumps({
             "enabled": sorted(enabled),
             "text_scale": round(text_scale, 2),
+            "launch_at_startup": bool(launch_at_startup),
         }, indent=2))
     except Exception as e:
         safe_print(f"[hub] could not save state: {e}", flush=True)
@@ -333,6 +339,12 @@ class Api:
         self._stderr: dict[str, collections.deque] = {}
         self._enabled: set[str] = set(state.get("enabled", []))
         self.text_scale = float(state.get("text_scale", 1.0))
+        # The OS is the source of truth here, not our own state file — the
+        # user may have removed the login entry outside the app.
+        try:
+            self.launch_at_startup = autostart.is_enabled()
+        except Exception:
+            self.launch_at_startup = bool(state.get("launch_at_startup", False))
         self._notice = ""
         self._features: list[Feature] = discover_features()
         self._lock = threading.Lock()
@@ -356,8 +368,12 @@ class Api:
     def get_panel_data(self, feature_id: str) -> dict:
         """Extra data a bespoke settings panel needs beyond options/shortcuts."""
         if feature_id == "dyslexia_font":
+            # Whether each font is actually on this machine: picking one that
+            # isn't installed used to fail with nothing visible happening,
+            # which read as "the whole feature is broken".
             return {
-                "fontChoices": [{"name": n, "note": winfonts.FONT_NOTES.get(n, "")}
+                "fontChoices": [{"name": n, "note": winfonts.FONT_NOTES.get(n, ""),
+                                 "installed": winfonts.is_font_installed(n)}
                                 for n in winfonts.FONT_CHOICES],
             }
         if feature_id == "colorblind_filter":
@@ -388,8 +404,12 @@ class Api:
         settings = store.load(feature_id)
         settings[key] = value
         store.save(feature_id, settings)
-        if feature_id == "colorblind_filter" and key == "enabled":
-            self._apply_colorblind_filter(settings)
+        if feature_id == "colorblind_filter" and key in ("enabled", "filter_name"):
+            # filter_name matters as much as enabled: a running filter does
+            # not re-read its type, so without this, picking a different
+            # filter changed nothing on screen.
+            if key == "enabled" or self._is_running(feature_id):
+                self._apply_colorblind_filter(settings)
         elif feature_id == "dyslexia_font" and key == "font_family" and self._is_running(feature_id):
             # Feature's already on — reapply immediately with the new font
             # instead of waiting for the next toggle.
@@ -423,6 +443,26 @@ class Api:
 
     def pretty_hotkey(self, spec: str) -> str:
         return hk.pretty(spec)
+
+    # ── start at login ──
+    def get_launch_at_startup(self) -> dict:
+        try:
+            self.launch_at_startup = autostart.is_enabled()
+        except Exception as e:
+            safe_print(f"[hub] could not read start-at-login state: {e}", flush=True)
+        return {"enabled": self.launch_at_startup,
+                "supported": autostart.is_supported()}
+
+    def set_launch_at_startup(self, enabled: bool) -> dict:
+        try:
+            autostart.set_enabled(bool(enabled))
+            self.launch_at_startup = bool(enabled)
+            save_state(self._enabled, self.text_scale, self.launch_at_startup)
+            return {"ok": True, "enabled": self.launch_at_startup}
+        except Exception as e:
+            safe_print(f"[hub] start-at-login change failed: {e}", flush=True)
+            self._notice = f"Start at login: {e}"
+            return {"ok": False, "enabled": autostart.is_enabled(), "error": str(e)}
 
     def _apply_colorblind_filter(self, settings: dict):
         requested_enabled = bool(settings.get("enabled", False))
@@ -471,7 +511,7 @@ class Api:
             else:
                 self._start(feat)
                 self._enabled.add(feat.id)
-            save_state(self._enabled, self.text_scale)
+            save_state(self._enabled, self.text_scale, self.launch_at_startup)
         return self.get_state()
 
     def _apply_single_toggle(self, feature_id: str, turning_on: bool):
@@ -508,6 +548,23 @@ class Api:
         if turning_on:
             settings = store.load("dyslexia_font")
             font_name = settings.get("font_family") or winfonts.FONT_CHOICES[0]
+            if plat.IS_WINDOWS and not winfonts.is_font_installed(font_name):
+                # The saved font was picked on another machine, or never
+                # installed here. Falling back beats failing with nothing
+                # visible happening, which is how this read as "not working".
+                fallback = next((f for f in winfonts.FONT_CHOICES
+                                 if winfonts.is_font_installed(f)), None)
+                if fallback is None:
+                    self._notice = (f"Dyslexia: {font_name} isn't installed, and no "
+                                    f"other supported font is either.")
+                    console.log_event("hub", "apply_result", feature="dyslexia_font",
+                                      ok=False, error="no installed font available")
+                    return
+                self._notice = (f"Dyslexia: {font_name} isn't installed on this PC — "
+                                f"using {fallback}.")
+                font_name = fallback
+                settings["font_family"] = fallback
+                store.save("dyslexia_font", settings)
         console.log_event("hub", "apply_start", feature="dyslexia_font",
                           turning_on=turning_on, font_name=font_name,
                           target_count=len(targets))
@@ -620,10 +677,21 @@ class Api:
             hosts_text = fm.HOSTS_PATH.read_text(encoding="utf-8", errors="ignore") \
                 if fm.HOSTS_PATH.exists() else ""
             marker_present = fm.MARK_BEGIN in hosts_text
-            console.log_event("hub", "apply_result", feature="focus_mode", ok=True,
+            console.log_event("hub", "apply_result", feature="focus_mode",
+                              ok=(marker_present == turning_on),
                               turning_on=turning_on, domains=domains,
                               was_admin=was_admin, needed_elevation=not was_admin,
                               marker_present_in_hosts=marker_present)
+            # The hosts file is the source of truth. If it disagrees with what
+            # was asked for, the toggle failed even though nothing raised —
+            # say so instead of leaving a switch that looks on and does nothing.
+            if marker_present != turning_on:
+                self._notice = ("Focus Mode: the block did not take effect. "
+                                "Try again and accept the permission prompt.")
+            elif turning_on:
+                self._notice = ("Focus Mode: blocking now. Tabs already open to a "
+                                "blocked site need a refresh — browsers cache their "
+                                "own lookups.")
         except Exception as e:
             safe_print(f"[hub] focus mode toggle failed: {e}", flush=True)
             self._notice = f"Focus Mode: {e}"
@@ -698,7 +766,7 @@ class Api:
                 self._apply_single_toggle(feat.id, True)
                 self._start(feat)
         self._enabled &= known
-        save_state(self._enabled, self.text_scale)
+        save_state(self._enabled, self.text_scale, self.launch_at_startup)
         self._cleanup_stale_dyslexia_font()
 
     def _cleanup_stale_dyslexia_font(self):
@@ -731,7 +799,7 @@ class Api:
                     self._notice = f"{feat.name} stopped: {reason}"
                     safe_print(f"[hub] '{feat.name}' exited with code {code} "
                                f"({reason})", flush=True)
-                save_state(self._enabled, self.text_scale)
+                save_state(self._enabled, self.text_scale, self.launch_at_startup)
         return self.get_state()
 
     def _crash_reason(self, feature_id: str, code: int) -> str:
@@ -755,7 +823,7 @@ class Api:
     # ── text size ──
     def set_text_scale(self, scale: float) -> float:
         self.text_scale = round(min(1.6, max(0.85, scale)), 2)
-        save_state(self._enabled, self.text_scale)
+        save_state(self._enabled, self.text_scale, self.launch_at_startup)
         return self.text_scale
 
     def get_text_scale(self) -> float:

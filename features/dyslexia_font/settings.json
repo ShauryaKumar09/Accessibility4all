@@ -1,8 +1,8 @@
 {
   "website_enabled": true,
-  "font_family": "OpenDyslexic",
-  "letter_spacing": 0.03,
-  "line_height": 1.55,
+  "font_family": "Comic Sans MS",
+  "letter_spacing": 0.08,
+  "line_height": 1.6,
   "font_weight": "inherit",
   "windows_targets": [
     "Arial",

@@ -190,21 +190,33 @@ def font_status_text(font_name: str) -> str:
 
 
 def broadcast_font_change():
+    """Tell running apps the font mapping changed.
+
+    WM_FONTCHANGE is the message that actually means "the set of fonts
+    changed" — WM_SETTINGCHANGE, which this used to send on its own, is for
+    policy and environment changes and no app re-maps fonts because of it.
+    Both go out now, since the older message is harmless and some apps watch
+    only one.
+
+    Even so, this can only ever be a nudge: GDI resolves a substitution when
+    a process first maps a font, so most already-running apps keep the old
+    one until they restart. New apps pick it up immediately.
+    """
     if not plat.IS_WINDOWS:
         return
+    HWND_BROADCAST = 0xFFFF
+    WM_SETTINGCHANGE = 0x001A
+    WM_FONTCHANGE = 0x001D
+    SMTO_ABORTIFHUNG = 0x0002
     try:
-        HWND_BROADCAST = 0xFFFF
-        WM_SETTINGCHANGE = 0x001A
-        SMTO_ABORTIFHUNG = 0x0002
         result = ctypes.c_ulong()
         ctypes.windll.user32.SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            "Windows",
-            SMTO_ABORTIFHUNG,
-            3000,
-            ctypes.byref(result),
+            HWND_BROADCAST, WM_FONTCHANGE, 0, None,
+            SMTO_ABORTIFHUNG, 3000, ctypes.byref(result),
+        )
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Windows",
+            SMTO_ABORTIFHUNG, 3000, ctypes.byref(result),
         )
     except Exception as e:
         log(f"could not broadcast font change: {e}")
@@ -218,17 +230,24 @@ def apply_windows_substitution(font_name: str, targets: list[str]) -> None:
 
     import winreg
 
-    backup = {
-        "font_name": font_name,
-        "registry_root": "HKEY_CURRENT_USER",
-        "path": FONT_SUBSTITUTES_PATH,
-        "values": {},
-    }
-    for target in targets:
-        backup["values"][target] = _read_registry_string(
-            winreg.HKEY_CURRENT_USER, FONT_SUBSTITUTES_PATH, target
-        )
-    BACKUP_FILE.write_text(json.dumps(backup, indent=2), encoding="utf-8")
+    # Only ever capture the backup once. Applying twice without restoring in
+    # between (toggling on twice, or changing font while it is already on)
+    # would otherwise record the ALREADY-substituted values as the originals,
+    # and restoring would then "restore" every system font to the dyslexia
+    # font permanently. That happened for real: a machine ended up with every
+    # UI font mapped to Comic Sans MS and no record of what it had been.
+    if not BACKUP_FILE.exists():
+        backup = {
+            "font_name": font_name,
+            "registry_root": "HKEY_CURRENT_USER",
+            "path": FONT_SUBSTITUTES_PATH,
+            "values": {},
+        }
+        for target in targets:
+            backup["values"][target] = _read_registry_string(
+                winreg.HKEY_CURRENT_USER, FONT_SUBSTITUTES_PATH, target
+            )
+        BACKUP_FILE.write_text(json.dumps(backup, indent=2), encoding="utf-8")
 
     for target in targets:
         _set_registry_string(winreg.HKEY_CURRENT_USER, FONT_SUBSTITUTES_PATH, target, font_name)

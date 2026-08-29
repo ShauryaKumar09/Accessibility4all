@@ -193,6 +193,28 @@ body {
 .home-card .state { margin-top: 12px; font-weight: 600; font-size: 14px; color: var(--fg-muted); }
 .home-card.on .state { color: var(--on); }
 
+.startup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 18px 20px;
+  background: var(--card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.startup-row[hidden] { display: none; }
+.startup-label {
+  font-size: calc(17px * var(--text-scale, 1));
+  font-weight: 600;
+}
+.startup-sub {
+  margin-top: 4px;
+  color: var(--fg-second);
+  font-size: calc(15px * var(--text-scale, 1));
+}
+
 /* feature page title row */
 .title-row {
   display: flex;
@@ -296,6 +318,8 @@ body {
 .font-card.selected { background: var(--accent-fill); border-color: var(--accent); }
 .font-card .fname { font-size: 17px; font-weight: 600; }
 .font-card .fnote { font-size: 13px; color: var(--fg-second); margin-top: 2px; }
+.font-card.unavailable { opacity: .45; cursor: not-allowed; }
+.font-card.unavailable:hover { border-color: var(--border); background: var(--card); }
 
 .stepper-row {
   display: flex;

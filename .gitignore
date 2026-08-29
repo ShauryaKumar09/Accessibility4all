@@ -5,6 +5,7 @@ __pycache__/
 
 # generated / machine-local
 trials.jsonl
+apply_log.jsonl
 hub_state.json
 feature_bus/commands.jsonl
 feature_bus/presence.json

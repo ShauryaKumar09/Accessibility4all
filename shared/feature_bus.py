@@ -102,7 +102,9 @@ def save_presence(data: dict):
 
 def update_presence(feature_id: str, pid: int, window: dict | None = None):
     data = load_presence()
-    entry = {"pid": pid}
+    # started_at dates the entry: a PID alone can be reused by an unrelated
+    # process after a feature dies, which would make a stale entry look live.
+    entry = {"pid": pid, "started_at": datetime.now(timezone.utc).timestamp()}
     if window:
         entry["window"] = window
     data[feature_id] = entry
