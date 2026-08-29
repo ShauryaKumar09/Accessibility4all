@@ -321,9 +321,63 @@ class Bubble:
         """Start the GUI loop. Blocks; `on_started` runs on a worker thread."""
         def _boot():
             self._ready.set()
+            self._make_really_transparent()
+            self._enforce_hidden()
             if on_started:
                 on_started()
         webview.start(_boot, private_mode=True)
+
+    def _make_really_transparent(self):
+        """Actually let the desktop show through the corners of the bubble.
+
+        pywebview asks WebView2 to paint transparently but never changes the
+        window's own background, which stays the default light control
+        colour. The rounded pill then sits on a visible pale rectangle —
+        reported as "a cut-off white box with the bubble on top of it".
+
+        Giving the form a transparency key makes those pixels genuinely
+        absent: the shape floats, and clicks pass through the empty corners
+        instead of being swallowed by an invisible rectangle. Magenta is the
+        conventional key colour precisely because no real UI uses it, so
+        nothing in the bubble can be keyed out by accident.
+        """
+        if sys.platform != "win32":
+            return                # Cocoa composites transparency properly
+        try:
+            from System import Action
+            from System.Drawing import Color
+            from webview.platforms.winforms import BrowserView
+
+            form = BrowserView.instances.get(self.window.uid)
+            if form is None:
+                return
+
+            def _apply():
+                form.BackColor = Color.Magenta
+                form.TransparencyKey = Color.Magenta
+
+            form.Invoke(Action(_apply))          # must run on the UI thread
+        except Exception as e:
+            # Not fatal: the bubble still works, it just keeps its backdrop.
+            print(f"[webbubble] transparent background unavailable: {e}", flush=True)
+
+    def _enforce_hidden(self):
+        """Undo pywebview showing a transparent window we asked to stay hidden.
+
+        pywebview's Windows backend calls Show()/Activate() for ANY
+        transparent window as soon as its page starts loading, ignoring
+        hidden=True (see edgechromium.py's on_navigation_start). Every
+        bubble here is transparent, so each one flashed itself onto the
+        screen at launch — the Tone card appeared with no text selected,
+        and bubbles meant to stay out of the way showed up as a half-painted
+        box before their CSS had applied.
+        """
+        if self._visible:
+            return
+        try:
+            self.window.hide()
+        except Exception:
+            pass
 
     def _closed(self):
         self._ready.clear()

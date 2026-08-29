@@ -200,8 +200,106 @@ def _elevate_mac(action: str, domains: list[str] | None):
         raise PermissionError(result.stderr.strip() or "Administrator permission was declined.")
 
 
+TASK_NAME = "Accessibility4allFocusMode"
+
+
+def _task_exists() -> bool:
+    result = subprocess.run(["schtasks", "/query", "/tn", TASK_NAME],
+                            capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def _register_task() -> bool:
+    """Register a scheduled task that can edit the hosts file without a prompt.
+
+    A task registered to run with highest privileges can be started later by
+    a normal user and will run elevated, so the permission prompt happens
+    once at setup instead of every single time Focus Mode is switched on or
+    off. Registering it is itself an elevated action, so this still costs one
+    prompt — just one, ever.
+    """
+    launcher = Path(sys.executable)
+    windowless = launcher.with_name("pythonw.exe")
+    if windowless.exists():
+        launcher = windowless          # no console window flashing up
+    command = f'"{launcher}" "{Path(__file__).resolve()}" --elevated-run "{ELEVATE_PAYLOAD_FILE}"'
+    args = ["schtasks", "/create", "/tn", TASK_NAME, "/tr", command,
+            "/sc", "ONCE", "/st", "00:00", "/rl", "HIGHEST", "/f"]
+    if is_admin():
+        ok = subprocess.run(args, capture_output=True, text=True).returncode == 0
+    else:
+        # Registering needs elevation; ask once via the same runas path.
+        ok = _elevate_run_command(args)
+    console.log_event("focus_mode", "register_task", ok=ok)
+    return ok
+
+
+def _elevate_run_command(args: list[str]) -> bool:
+    """Run one command elevated, waiting for it to finish."""
+    import pywintypes
+    import win32event
+    import win32process
+    from win32com.shell import shell, shellcon
+
+    params = subprocess.list2cmdline(args[1:])
+    try:
+        info = shell.ShellExecuteEx(
+            nShow=0, fMask=shellcon.SEE_MASK_NOCLOSEPROCESS, lpVerb="runas",
+            lpFile=args[0], lpParameters=params,
+        )
+    except pywintypes.error as e:
+        if e.winerror == 1223:
+            raise PermissionError("Administrator permission was declined.")
+        raise PermissionError(f"Could not request Administrator permission: {e}")
+    win32event.WaitForSingleObject(info["hProcess"], win32event.INFINITE)
+    return win32process.GetExitCodeProcess(info["hProcess"]) == 0
+
+
+def _run_via_task(action: str, domains: list[str] | None) -> bool:
+    """Do the hosts edit through the scheduled task — no prompt."""
+    ELEVATE_PAYLOAD_FILE.write_text(
+        json.dumps({"action": action, "domains": domains or []}), encoding="utf-8")
+    if ELEVATE_STATUS_FILE.exists():
+        ELEVATE_STATUS_FILE.unlink()
+
+    if subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
+                      capture_output=True, text=True).returncode != 0:
+        return False
+
+    # schtasks returns as soon as it has handed the task off, so wait for the
+    # worker to report back rather than assuming it already ran.
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if ELEVATE_STATUS_FILE.exists():
+            try:
+                status = json.loads(ELEVATE_STATUS_FILE.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                time.sleep(0.1)
+                continue
+            if not status.get("ok"):
+                raise PermissionError(status.get("error") or "Hosts-file update failed.")
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _elevate_hosts_action(action: str, domains: list[str] | None):
     if plat.IS_WINDOWS:
+        # Preferred path: the one-time scheduled task, which needs no prompt.
+        try:
+            if _task_exists() and _run_via_task(action, domains):
+                return
+        except PermissionError:
+            raise
+        except Exception as e:
+            log(f"scheduled task unavailable ({e}); falling back to a prompt")
+        try:
+            if _register_task() and _run_via_task(action, domains):
+                return
+        except PermissionError:
+            raise
+        except Exception as e:
+            log(f"could not register the task ({e}); falling back to a prompt")
         _elevate_windows(action, domains)
     elif plat.IS_MAC:
         _elevate_mac(action, domains)

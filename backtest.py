@@ -92,6 +92,8 @@ def test_cursor_size():
         return
     import hub
 
+    from shared import cursors
+
     api = hub.Api()
     before = _cursor_state()
     try:
@@ -99,6 +101,12 @@ def test_cursor_size():
         size, base = _cursor_state()
         check("slider value stored", size, 10)
         check("pixel size derived", base, "176", "32 + 16 * (10 - 1)")
+        # The check that matters: the registry values above were already
+        # correct while the pointer on screen stayed exactly the same size.
+        # Only reloading the cursor images actually resizes it.
+        check("pointer images actually reloaded at the new size",
+              _live_cursor_width() > 32, True,
+              f"measured {_live_cursor_width()}px")
 
         api._apply_cursor_size(1)
         size, base = _cursor_state()
@@ -110,6 +118,52 @@ def test_cursor_size():
             api._apply_cursor_size(before[0] or 1)
         except Exception:
             pass
+
+
+def _live_cursor_width() -> int:
+    """Width of the arrow pointer Windows is actually drawing right now."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
+                    ("yHotspot", wintypes.DWORD), ("hbmMask", wintypes.HBITMAP),
+                    ("hbmColor", wintypes.HBITMAP)]
+
+    class BITMAP(ctypes.Structure):
+        _fields_ = [("bmType", wintypes.LONG), ("bmWidth", wintypes.LONG),
+                    ("bmHeight", wintypes.LONG), ("bmWidthBytes", wintypes.LONG),
+                    ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                    ("bmBits", ctypes.c_void_p)]
+
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    # Handles exceed 32 bits on 64-bit Windows, so every one of these needs a
+    # declared signature or ctypes truncates it and raises OverflowError.
+    user32.LoadCursorW.restype = wintypes.HANDLE
+    user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+    user32.CopyIcon.restype = wintypes.HANDLE
+    user32.CopyIcon.argtypes = [wintypes.HANDLE]
+    user32.GetIconInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(ICONINFO)]
+    user32.DestroyIcon.argtypes = [wintypes.HANDLE]
+    gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+    gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+
+    cursor = user32.CopyIcon(user32.LoadCursorW(None, wintypes.LPCWSTR(32512)))
+    if not cursor:
+        return 0
+    info = ICONINFO()
+    if not user32.GetIconInfo(cursor, ctypes.byref(info)):
+        user32.DestroyIcon(cursor)
+        return 0
+    bmp = BITMAP()
+    width = 0
+    if gdi32.GetObjectW(info.hbmMask, ctypes.sizeof(BITMAP), ctypes.byref(bmp)):
+        width = bmp.bmWidth
+    for h in (info.hbmMask, info.hbmColor):
+        if h:
+            gdi32.DeleteObject(h)
+    user32.DestroyIcon(cursor)
+    return width
 
 
 def _cursor_state():

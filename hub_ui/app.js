@@ -261,9 +261,13 @@ function renderDyslexiaPanel(host, feat, settings, panelData, on) {
       </div>
     </div>
     <div class="screen-btn">
+      <button class="text-btn" id="open-extension">Set up the Chrome extension</button>
       <button class="text-btn primary" id="start-screening">Take the screening test</button>
     </div>
   `;
+  document.getElementById("open-extension").addEventListener("click", async () => {
+    await api().open_chrome_extension_setup();
+  });
   const grid = document.getElementById("font-grid");
   for (const f of panelData.fontChoices || []) {
     const card = document.createElement("div");
@@ -416,7 +420,6 @@ async function openScreeningModal() {
 function showScreeningIntro() {
   openModal(`
     <h3>Dyslexia Screening</h3>
-    <p style="color:var(--warm-text);margin-bottom:12px">${escapeHtml(SCREENING.disclaimer)}</p>
     <p>${SCREENING.questions.length} quick questions, then a short timed reading task.</p>
     <div class="modal-actions"><button class="text-btn primary" id="q-start">Start</button></div>
   `);
@@ -467,7 +470,6 @@ function showScreeningResult(wpm) {
   openModal(`
     <h3>Result</h3>
     <p style="color:${color};font-weight:600">${msg} (reading speed: ${Math.round(wpm)} words/min)</p>
-    <p style="color:var(--warm-text);margin-top:10px">${escapeHtml(SCREENING.disclaimer)}</p>
     <div class="modal-actions"><button class="text-btn" id="q-again">Try again</button></div>
   `);
   document.getElementById("q-again").addEventListener("click", openScreeningModal);

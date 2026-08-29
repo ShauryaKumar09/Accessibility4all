@@ -38,6 +38,7 @@ from dotenv import load_dotenv
 from shared import console
 from shared.console import configure_stdio, safe_print
 from shared import autostart
+from shared import cursors
 from shared import hotkeys as hk
 from shared import platform as plat
 from shared import pynput_darwin
@@ -444,6 +445,23 @@ class Api:
     def pretty_hotkey(self, spec: str) -> str:
         return hk.pretty(spec)
 
+    # ── dyslexia Chrome extension ──
+    def open_chrome_extension_setup(self) -> dict:
+        """Open both halves of the one step Chrome will not let us automate.
+
+        Loading an unpacked extension needs a human to click through
+        chrome://extensions, so the least we can do is put the folder and
+        that page in front of them instead of describing where to look.
+        """
+        try:
+            winfonts.open_extension_folder()
+            winfonts.open_chrome_extensions()
+            return {"ok": True}
+        except Exception as e:
+            safe_print(f"[hub] could not open extension setup: {e}", flush=True)
+            self._notice = f"Dyslexia: {e}"
+            return {"ok": False, "error": str(e)}
+
     # ── start at login ──
     def get_launch_at_startup(self) -> dict:
         try:
@@ -597,54 +615,30 @@ class Api:
                               ok=False, error=str(e))
 
     def _apply_cursor_size(self, size: int):
-        """Windows' pointer-size slider, applied from here (not the
-        subprocess) for the same reason as focus_mode/colorblind_filter:
-        Popen.terminate() on Windows is TerminateProcess with no signal
-        delivery, so a subprocess-side restore-on-shutdown handler never
-        runs when the hub stops it — the registry write has to happen from
-        the process guaranteed to still be alive when the toggle flips.
+        """Resize the pointer now, not just in the registry.
 
-        Two keys, matching what Settings > Accessibility > Mouse pointer
-        writes: Accessibility\\CursorSize holds the UI's 1-15 slider value,
-        Cursors\\CursorBaseSize is the derived pixel size Windows actually
-        renders at (32 + 16 * (size - 1)).
+        Applied from here rather than the subprocess for the same reason as
+        focus_mode/colorblind_filter: Popen.terminate() on Windows is
+        TerminateProcess with no signal delivery, so a subprocess cannot be
+        relied on to put the pointer back when the hub stops it.
+
+        See shared/cursors.py for why the registry values alone did nothing
+        visible — the pointer only changes when the cursor images are
+        reloaded at the new size.
         """
         if not plat.IS_WINDOWS:
             return
-        size = max(1, min(15, int(size)))
+        size = cursors.clamp(size)
         console.log_event("hub", "apply_start", feature="cursor_size", requested_size=size)
         try:
-            import ctypes
-            import winreg
-
-            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Accessibility",
-                                    0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
-                winreg.SetValueEx(key, "CursorSize", 0, winreg.REG_DWORD, size)
-            base_px = 32 + 16 * (size - 1)
-            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors",
-                                    0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
-                winreg.SetValueEx(key, "CursorBaseSize", 0, winreg.REG_SZ, str(base_px))
-            SPI_SETCURSORS = 0x0057
-            ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
-
-            verified_cursor_size = None
-            verified_base_size = None
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Accessibility",
-                                    0, winreg.KEY_READ) as key:
-                    verified_cursor_size, _ = winreg.QueryValueEx(key, "CursorSize")
-            except OSError:
-                pass
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors",
-                                    0, winreg.KEY_READ) as key:
-                    verified_base_size, _ = winreg.QueryValueEx(key, "CursorBaseSize")
-            except OSError:
-                pass
-            console.log_event("hub", "apply_result", feature="cursor_size", ok=True,
-                              requested_size=size, requested_base_px=base_px,
-                              verified_cursor_size=verified_cursor_size,
-                              verified_base_size=verified_base_size)
+            changed = cursors.apply_size(size)
+            console.log_event("hub", "apply_result", feature="cursor_size",
+                              ok=changed > 0, requested_size=size,
+                              requested_base_px=cursors.pixels_for(size),
+                              cursors_changed=changed,
+                              verified_cursor_size=cursors.read_size())
+            if changed == 0:
+                self._notice = "Cursor Size: Windows did not accept the new pointer size."
         except Exception as e:
             safe_print(f"[hub] cursor size apply failed: {e}", flush=True)
             self._notice = f"Cursor Size: {e}"

@@ -62,7 +62,10 @@ DEFAULTS: dict[str, dict] = {
     },
 }
 
-TONE_TEXT_SIZES = {"small": 18, "medium": 22, "large": 28}
+# 17px is the floor the design sets for body copy and this is a tool for
+# people who find reading hard, so "small" stops there rather than going
+# smaller. The card itself got tighter instead.
+TONE_TEXT_SIZES = {"small": 17, "medium": 19, "large": 24}
 
 
 def settings_path(feature_id: str) -> Path:

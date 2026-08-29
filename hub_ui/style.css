@@ -449,7 +449,7 @@ body {
 }
 
 /* screening test */
-.screen-btn { margin-top: 8px; }
+.screen-btn { margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; }
 .quiz-card { background: var(--inset); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 16px; margin: 14px 0; }
 .quiz-opt {

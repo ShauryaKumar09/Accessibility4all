@@ -91,9 +91,9 @@ OK = C["ON"]
 WARN = C["WARM_TEXT"]
 REC = C["STOP_BORDER"]
 
-CARD_W = 400
-CARD_PAD_X, CARD_PAD_Y = 22, 20
-CARD_GAP = 12
+CARD_W = 330
+CARD_PAD_X, CARD_PAD_Y = 16, 14
+CARD_GAP = 10
 SETTINGS_WATCH_MS = 700
 # Three named sizes replace the old free-form spinbox.
 TEXT_SIZES = store.TONE_TEXT_SIZES
@@ -112,10 +112,15 @@ BODY = """
 CSS = """
 #card   { width: %(W)dpx; padding: %(PY)dpx %(PX)dpx; gap: %(GAP)dpx; }
 #chip:empty { display: none; }
+#chip { font-size: 14px; padding: 4px 11px; }
 #chip.neutral { background: %(CHIP)s; border-color: %(BORDER_CHIP)s;
                 color: %(FG_SECOND)s; font-weight: 400; }
-#answer { font-size: 22px; line-height: 1.45; color: var(--fg);
+#answer { font-size: 19px; line-height: 1.4; color: var(--fg);
           text-wrap: pretty; }
+/* A dismiss button does not need to be as prominent as the answer, and the
+   card reads as less of a slab when it is not a full-width slab of button. */
+#got { height: 38px; font-size: 15px; border-width: 1px; border-radius: 10px;
+       align-self: flex-end; padding: 0 18px; }
 """ % {"W": CARD_W, "PX": CARD_PAD_X, "PY": CARD_PAD_Y, "GAP": CARD_GAP,
        "CHIP": C["CHIP"], "BORDER_CHIP": C["BORDER_CHIP"],
        "FG_SECOND": C["FG_SECOND"]}
