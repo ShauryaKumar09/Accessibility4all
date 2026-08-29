@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FEATURE_DIR = ROOT / "features" / "dyslexia_font"
 BACKUP_FILE = FEATURE_DIR / "windows_font_backup.json"
 EXTENSION_DIR = FEATURE_DIR / "chrome_extension"
+BUNDLED_FONT_DIR = ROOT / "assets" / "fonts"
 
 FONT_SUBSTITUTES_PATH = r"Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes"
 FONTS_PATH = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
@@ -177,6 +178,77 @@ def is_font_installed(font_name: str) -> bool:
     low = font_name.lower()
     fonts = installed_windows_fonts()
     return any(low == font or low in font for font in fonts)
+
+
+def install_bundled_font(font_name: str = "OpenDyslexic") -> bool:
+    """Install a font we ship, for this user only. No admin needed.
+
+    The point of the feature is a dyslexia-friendly typeface, so shipping
+    without one and greying it out in the picker would be shipping a feature
+    that does nothing on a fresh machine. Copying into the per-user font
+    directory and registering it under HKCU avoids the admin prompt that
+    installing into C:\\Windows\\Fonts would require.
+
+    OpenDyslexic is SIL Open Font License, which permits redistribution;
+    assets/fonts/OFL.txt travels with it.
+    """
+    if not plat.IS_WINDOWS:
+        return False
+    stem = font_name.replace(" ", "")
+    files = sorted(f for ext in ("*.otf", "*.ttf")
+                   for f in BUNDLED_FONT_DIR.glob(f"{stem}{ext}"))
+    if not files:
+        log(f"no bundled files found for {font_name}")
+        return False
+
+    import shutil
+    import winreg
+
+    target_dir = Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "Windows" / "Fonts"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    installed_any = False
+    for src in files:
+        dest = target_dir / src.name
+        try:
+            if not dest.exists():
+                shutil.copy2(src, dest)
+            # AddFontResourceW makes it usable in this session; the HKCU
+            # registration is what makes it survive a reboot.
+            ctypes.windll.gdi32.AddFontResourceW(str(dest))
+            face = _face_name_for(src.stem)
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, FONTS_PATH, 0,
+                                    winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                winreg.SetValueEx(key, face, 0, winreg.REG_SZ, str(dest))
+            installed_any = True
+        except Exception as e:
+            log(f"could not install {src.name}: {e}")
+    if installed_any:
+        broadcast_font_change()
+    console.log_event("windows_fonts", "install_bundled_font", font=font_name,
+                      files=len(files), ok=installed_any,
+                      verified=is_font_installed(font_name))
+    return installed_any
+
+
+# Filename stem -> the family name the font actually declares. Spelled out
+# rather than derived, because the two do not follow one rule: OpenDyslexic
+# is one word while Atkinson Hyperlegible is two, and guessing from
+# CamelCase turns the first into "Open Dyslexic", which then matches nothing.
+_BUNDLED_FAMILIES = {
+    "OpenDyslexic": "OpenDyslexic",
+    "AtkinsonHyperlegible": "Atkinson Hyperlegible",
+}
+
+
+def _face_name_for(stem: str) -> str:
+    """The name Windows lists a font file under, e.g. 'OpenDyslexic Bold (OpenType)'."""
+    import re
+
+    parts = stem.split("-")
+    family = _BUNDLED_FAMILIES.get(parts[0], parts[0])
+    style = " ".join(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", p) for p in parts[1:]).strip()
+    label = f"{family} {style}".strip() if style and style != "Regular" else family
+    return f"{label} (OpenType)"
 
 
 def font_status_text(font_name: str) -> str:

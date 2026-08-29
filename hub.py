@@ -549,9 +549,14 @@ class Api:
             settings = store.load("dyslexia_font")
             font_name = settings.get("font_family") or winfonts.FONT_CHOICES[0]
             if plat.IS_WINDOWS and not winfonts.is_font_installed(font_name):
-                # The saved font was picked on another machine, or never
-                # installed here. Falling back beats failing with nothing
-                # visible happening, which is how this read as "not working".
+                # We ship OpenDyslexic, so install it on demand rather than
+                # making the user go and find a font before the feature that
+                # exists to provide one will do anything.
+                winfonts.install_bundled_font(font_name)
+            if plat.IS_WINDOWS and not winfonts.is_font_installed(font_name):
+                # Not one of ours and not on this PC. Falling back beats
+                # failing with nothing visible happening, which is how this
+                # read as "not working".
                 fallback = next((f for f in winfonts.FONT_CHOICES
                                  if winfonts.is_font_installed(f)), None)
                 if fallback is None:
@@ -835,6 +840,22 @@ class Api:
             self._stop(feat)
 
 
+def _bring_to_front(window):
+    """Open in front of whatever the user was doing.
+
+    Launching the hub and having its window appear silently behind the
+    browser reads as "it didn't start" — which is exactly how it was
+    reported. pywebview has no cross-platform raise, so nudge it: a brief
+    always-on-top flip is enough for the window manager to lift it, and it
+    must not STAY on top or it would sit over the user's work.
+    """
+    try:
+        window.on_top = True
+        window.on_top = False
+    except Exception:
+        pass
+
+
 def main():
     safe_print(f"[hub] Accessibility4all hub starting | features dir: {FEATURES_DIR}",
                flush=True)
@@ -849,6 +870,7 @@ def main():
     window.events.closed += api.shutdown
 
     def _restore():
+        _bring_to_front(window)
         api.restore_enabled()
 
     webview.start(_restore, debug=False)

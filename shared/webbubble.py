@@ -183,11 +183,41 @@ def page(body: str, css: str = "", js: str = "") -> str:
     )
 
 
+def _dpi_scale() -> float:
+    """How many physical pixels Windows paints per logical point.
+
+    1.0 at 100% display scaling, 1.25 at 125%, and so on.
+    """
+    if sys.platform != "win32":
+        return 1.0                # Cocoa already reports points
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        hdc = user32.GetDC(0)
+        try:
+            LOGPIXELSX = 88
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, LOGPIXELSX)
+        finally:
+            user32.ReleaseDC(0, hdc)
+        return (dpi / 96.0) if dpi else 1.0
+    except Exception:
+        return 1.0
+
+
 def screen_size() -> tuple[int, int]:
-    """The main display in logical points — what window coordinates are in."""
+    """The main display in logical points — what window coordinates are in.
+
+    `webview.screens` reports PHYSICAL pixels, while window positions and
+    sizes are logical points. On a display scaled above 100% the two differ,
+    and placing a bubble from the physical number pushes it past the edge —
+    at 125% a bottom-right card landed a third of the way off the screen
+    with its text cut off. Divide the physical size back down to points.
+    """
     try:
         s = webview.screens[0]
-        return int(s.width), int(s.height)
+        scale = _dpi_scale()
+        return int(s.width / scale), int(s.height / scale)
     except Exception:
         return 1440, 900
 

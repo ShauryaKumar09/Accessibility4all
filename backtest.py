@@ -257,6 +257,16 @@ def test_placement():
     check("centred placement still works",
           abs(fake.x + fake.w // 2 - sw // 2) <= 2, True)
 
+    # The bug this guards: webview.screens reports physical pixels while
+    # window coordinates are logical points. On a scaled display the two
+    # differ, and a DPI-aware feature (tone_reader, page_reader,
+    # voice_control all opt in) placed its card partly off the screen.
+    import webview
+    raw_w = webview.screens[0].width
+    check("screen size is in logical points, not physical pixels",
+          wb.screen_size()[0], int(raw_w / wb._dpi_scale()),
+          f"display scaling is {wb._dpi_scale():.2f}x")
+
 
 GROUPS = {
     "colorblind": test_colorblind,
