@@ -97,12 +97,21 @@ def save(feature_id: str, settings: dict):
 
 
 class Watcher:
-    """Poll a feature's settings.json and report when it changed on disk."""
+    """Poll a feature's settings.json and report when it changed on disk.
+
+    Compares the file's *contents*, not just its timestamp. Every feature
+    saves its own settings once during startup, which is a write the watcher
+    would otherwise report back as a change the hub had made: page_reader and
+    tone_reader rebound their hotkeys a second later, and cursor_size and
+    dyslexia_font re-showed their bubble, all from their own no-op save. A
+    rewrite that leaves the bytes identical is not a change.
+    """
 
     def __init__(self, feature_id: str):
         self.feature_id = feature_id
         self._path = settings_path(feature_id)
         self._stamp = self._read_stamp()
+        self._body = self._read_body()
 
     def _read_stamp(self):
         try:
@@ -111,9 +120,19 @@ class Watcher:
         except OSError:
             return None
 
+    def _read_body(self):
+        try:
+            return self._path.read_bytes()
+        except OSError:
+            return None
+
     def changed(self) -> bool:
         stamp = self._read_stamp()
-        if stamp != self._stamp:
-            self._stamp = stamp
-            return True
-        return False
+        if stamp == self._stamp:
+            return False                      # untouched: cheap path, no read
+        self._stamp = stamp
+        body = self._read_body()
+        if body == self._body:
+            return False                      # rewritten with the same bytes
+        self._body = body
+        return True

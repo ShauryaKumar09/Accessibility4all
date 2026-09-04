@@ -337,10 +337,15 @@ def _match_typing(command: str) -> tuple[dict | None, str | None]:
             payload = re.sub(
                 r"(?i)\s+(?:on|in|using)\s+(?:google|bing|the web|the internet|online)\s*$",
                 "", payload).strip()
+        looks_url = _looks_like_url(payload) or _looks_like_url(_normalize_url(payload))
         force_web = bool(
-            web_phrase or on_engine or verb in ("google", "bing")
+            web_phrase or on_engine or verb in ("google", "bing") or looks_url
             or (target and re.search(r"address|url|location|omnibox", target)))
         if payload.strip().lower() not in _NON_PAYLOAD:
+            if looks_url:
+                norm = _normalize_url(payload)
+                return (_seq(plat.hotkey_action("mod", "l"), _type(norm, enter=True)),
+                        f"open website {norm!r}")
             if force_web:
                 return (_seq(plat.hotkey_action("mod", "l"), _type(payload, enter=True)),
                         f"search the web for {payload!r}")

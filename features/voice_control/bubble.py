@@ -45,7 +45,21 @@ BASE_W, BASE_H = 14, 3
 
 BAR_H = MIC_D + PAD_V * 2                       # 64
 BAR_W = 348                                     # the resting pill
-BAR_MAX_W = 500            # long result lines may grow the pill this far
+
+
+def _max_w() -> int:
+    """How wide the pill may grow for a long line.
+
+    A result line like "Okay - search the web for 'youtube.com'" needs about
+    470pt, so a fixed 500 clipped almost every real confirmation. Grow with the
+    display instead, and still leave a margin so the pill never runs to the
+    screen edge.
+    """
+    sw, _ = wb.screen_size()
+    return max(BAR_W, min(760, sw - 160))
+
+
+BAR_MAX_W = _max_w()
 
 BODY = """
 <div class="pill" id="bar">
@@ -138,15 +152,22 @@ wave.querySelectorAll('i').forEach((el, i) => {
 // that looks like it had room.
 measure.style.font = getComputedStyle(textEl).font;
 
+// How wide the pill wants to be for this line. Python asks first, so it can
+// resize the *window* before the div animates into the new width -- the div is
+// clipped by the window, so growing the div alone just cut the text off.
+function measureWidth(text) {
+  measure.textContent = text;
+  const want = Math.ceil(CHROME + measure.offsetWidth) + 4;
+  return Math.min(MAX_W, Math.max(BASE_W, want));
+}
+
 function setState(state, text, color) {
   bar.classList.toggle('listening', state === 'listening');
   textEl.textContent = text;
   textEl.style.color = color;
-  // grow the pill only when the line genuinely needs the room; the width is an
-  // explicit px value so the CSS transition has something to animate between
-  measure.textContent = text;
-  const want = Math.ceil(CHROME + measure.offsetWidth) + 4;
-  bar.style.width = Math.min(MAX_W, Math.max(BASE_W, want)) + 'px';
+  // the width is an explicit px value so the CSS transition has something to
+  // animate between
+  bar.style.width = measureWidth(text) + 'px';
 }
 
 // 0..1 mic energy. The floor keeps a quiet room alive rather than flat, and
@@ -192,10 +213,16 @@ class Bar:
     Everything else is safe to call from any thread — see `webbubble.Bubble`.
     """
 
+    # The div's width transition, from bubble.py's CSS (#bar, .24s).
+    _GROW_MS = 240
+
     def __init__(self, events: queue.Queue, sched: "wb.Scheduler | None" = None,
                  on_closed=None):
         self._last: tuple[str, str, str] | None = None
         self._last_level = -1.0
+        self._sched = sched
+        self._content_w = BAR_W
+        self._shrink_at: int | None = None
         self.bubble = wb.Bubble(
             "Voice Control", BODY, BAR_W, BAR_H,
             css=CSS % _TOKENS, js=JS % _TOKENS, api=_JsApi(events),
@@ -214,8 +241,45 @@ class Bar:
         if payload == self._last:
             return
         self._last = payload
+        self._fit_window(text)
         self.bubble.call(f"setState({json.dumps(state)}, {json.dumps(text)}, "
                          f"{json.dumps(color)})")
+
+    def _fit_window(self, text: str):
+        """Match the window to the width this line is about to need.
+
+        The pill is a div inside a fixed-size window, so a line that grew the
+        div past the window was simply cut off mid-word. Ask the page how wide
+        the line wants to be, then move the window to suit.
+
+        Order matters, because the div animates and the window does not:
+        growing, the window has to be big enough BEFORE the div expands into
+        it; shrinking, the window must stay big until the div has finished
+        pulling in, or the tail of the old text is clipped on the way out.
+        """
+        want = int(self.bubble.measure(
+            f"measureWidth({json.dumps(text)})", default=self._content_w) or
+            self._content_w)
+        want = max(BAR_W, min(BAR_MAX_W, want))
+        if want == self._content_w:
+            return
+        if self._shrink_at is not None and self._sched:
+            self._sched.after_cancel(self._shrink_at)
+            self._shrink_at = None
+        if want > self._content_w:
+            self._apply_width(want)
+        elif self._sched:
+            self._shrink_at = self._sched.after(
+                self._GROW_MS + 40, lambda: self._apply_width(want))
+        else:
+            self._apply_width(want)
+
+    def _apply_width(self, width: int):
+        """Resize the window and keep the pill centred where it was."""
+        self._shrink_at = None
+        self._content_w = width
+        self.bubble.resize_content(width, BAR_H)
+        self.bubble.place_bottom_center()
 
     def set_level(self, level: float):
         level = max(0.0, min(1.0, level))

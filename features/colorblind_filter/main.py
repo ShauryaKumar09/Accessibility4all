@@ -216,35 +216,139 @@ def _set_filter_windows(enabled: bool, filter_type: int):
             "are allowed in Settings > Accessibility > Color filters.")
 
 
-def _set_filter_mac(enabled: bool, filter_type_name: str):
-    """Toggle macOS' Color Filters checkbox by scripting System Settings.
+# macOS's own Color Filters popup (Accessibility > Display) offers these exact
+# labels, read off the live menu — NOT the same wording as our Windows-facing
+# FILTER_TYPES names. "Invert" / "Grayscale Inverted" have no equivalent here:
+# macOS's "Invert colors" switch lives in a different section of the same
+# page, far from the "Color Filters" anchor, and System Settings' SwiftUI
+# list only materializes accessibility elements for rows that are actually
+# scrolled into view — so once the anchor scrolls to Color Filters, "Invert
+# colors" often silently isn't in the tree at all (confirmed on 26.5.2: it
+# was found once right after opening the pane, then vanished from the same
+# query moments later with no UI change of ours in between). Scripting it
+# would be flaky in a way scripting the anchored controls below is not, so
+# it's left unsupported here rather than pretending to work.
+_MAC_FILTER_LABELS = {
+    "Deuteranopia": "Green/Red filter (Deuteranopia)",
+    "Protanopia": "Red/Green filter (Protanopia)",
+    "Tritanopia": "Blue/Yellow filter (Tritanopia)",
+    "Grayscale": "Grayscale",
+}
 
-    BEST EFFORT, AND UNVERIFIED ON REAL HARDWARE. macOS exposes no public
-    API for this: there is no documented `defaults` key, and Option-Cmd-F5
-    opens the Accessibility Shortcuts panel rather than toggling the filter.
-    UI scripting is what other tools resort to, and it breaks whenever Apple
-    rearranges System Settings — so treat a failure here as "Apple moved the
-    checkbox", not as a bug in the caller.
+
+def _set_filter_mac(enabled: bool, filter_type_name: str):
+    """Toggle macOS' Color Filters by scripting the Accessibility > Display pane.
+
+    BEST EFFORT. macOS exposes no public API for this. The previous version
+    used `reveal anchor "Seeing_ColorFilters" of pane id
+    "com.apple.preference.universalaccess"` — the old System *Preferences*
+    AppleScript API, which System *Settings* (Ventura+) no longer implements
+    for this pane: it fails with "Can't get pane id ... (-1728)" on every
+    current macOS (verified on 26.5.2), so nothing was ever toggled. It also
+    clicked "the first checkbox found anywhere in the window", which was
+    never guaranteed to be the right one even on a version where the reveal
+    worked. This version opens the pane with the `open` URL scheme (the
+    replacement Apple ships for deep-linking System Settings) and finds
+    "Color filters" / "Filter type" by their real accessibility name, so a
+    failure here means "Apple renamed a control", not "Apple moved the
+    checkbox".
 
     Requires the user to grant Accessibility permission to whatever runs
     Python (System Settings > Privacy & Security > Accessibility).
     """
-    want = "true" if enabled else "false"
+    if filter_type_name not in _MAC_FILTER_LABELS:
+        raise RuntimeError(
+            f"{filter_type_name!r} has no equivalent in macOS's Color Filters — "
+            "use Deuteranopia, Protanopia, Tritanopia, or Grayscale on macOS.")
+    want_filter_on = enabled
+    filter_label = _MAC_FILTER_LABELS[filter_type_name]
+
+    subprocess.run(
+        ["open", "x-apple.systempreferences:com.apple.Accessibility-Settings.extension"
+                  "?Seeing_ColorFilters"],
+        capture_output=True)
+    # `open` re-navigates to the anchor even if the pane is already showing
+    # (e.g. re-applying while System Settings never closed), which restarts
+    # the same scroll/reflow animation as a cold open. Without this, the
+    # element search below can grab a reference mid-reflow: the popup opens
+    # and a menu item gets clicked, but the selection never commits, because
+    # the AXPopUpButton it clicked was about to be replaced by the reflow.
+    time.sleep(0.6)
+
     script = f'''
-    tell application "System Settings"
-        activate
-        delay 0.6
-        reveal anchor "Seeing_ColorFilters" of pane id "com.apple.preference.universalaccess"
-    end tell
-    delay 1.0
+    tell application "System Settings" to activate
+    delay 0.3
     tell application "System Events"
         tell process "System Settings"
-            repeat with cb in (every checkbox of entire contents of window 1)
-                if (value of cb as boolean) is not {want} then
-                    click cb
-                end if
-                exit repeat
+            set filterCB to missing value
+            repeat 20 times
+                try
+                    set els to entire contents of window 1
+                    repeat with el in els
+                        try
+                            if (role of el as text) is "AXCheckBox" and (name of el as text) is "Color filters" then
+                                set filterCB to el
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                end try
+                if filterCB is not missing value then exit repeat
+                delay 0.3
             end repeat
+            if filterCB is missing value then
+                error "could not locate the Color filters control (Apple may have renamed it)"
+            end if
+            if ((value of filterCB) as integer) is not {1 if want_filter_on else 0} then
+                click filterCB
+                -- toggling this checkbox inserts a new "Intensity" slider row
+                -- right above the popup, which briefly reflows the list; grab
+                -- the popup only after that settles, or the click below can
+                -- land on a stale/mid-transition reference and silently miss.
+                delay 0.5
+            end if
+
+            if {1 if want_filter_on else 0} is 1 then
+                set popupOk to false
+                repeat 3 times
+                    -- re-fetch fresh each attempt: a reference held across a
+                    -- prior failed click can be stale, and a stale reference
+                    -- accepts "click" and "click menu item" without error
+                    -- while doing nothing — the exact failure mode that made
+                    -- the previous version silently leave the wrong filter
+                    -- type selected.
+                    set thePopup to missing value
+                    repeat 20 times
+                        try
+                            set els2 to entire contents of window 1
+                            repeat with el in els2
+                                try
+                                    if (role of el as text) is "AXPopUpButton" and (name of el as text) is "Filter type" then
+                                        set thePopup to el
+                                        exit repeat
+                                    end if
+                                end try
+                            end repeat
+                        end try
+                        if thePopup is not missing value then exit repeat
+                        delay 0.3
+                    end repeat
+                    if thePopup is missing value then
+                        error "could not locate the Filter type control (Apple may have renamed it)"
+                    end if
+                    if (value of thePopup as text) is "{filter_label}" then
+                        set popupOk to true
+                        exit repeat
+                    end if
+                    click thePopup
+                    delay 0.3
+                    click menu item "{filter_label}" of menu 1 of thePopup
+                    delay 0.3
+                end repeat
+                if not popupOk then
+                    error "Filter type selection did not take after 3 attempts"
+                end if
+            end if
         end tell
     end tell
     tell application "System Settings" to quit
