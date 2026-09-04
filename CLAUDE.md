@@ -135,7 +135,60 @@ desktop only gets a bubble".
   `shared/ui_kit.py`'s `C` dict plus the pieces every bubble is built from:
   `.pill`, `.card`, `.dot`, `.label`, `.chip`, `.circle`, `.track`, `.btn`.
   Build a new bubble out of those rather than inventing a second visual
-  language. Minimum target size is 48px and body copy never below 17px.
+  language. Targets are 34px and body copy 14px — deliberately below the
+  48px/17px floors the redesign started from, because at those sizes the
+  bubbles read as slabs sitting on top of the user's work rather than as
+  something floating beside it. Raise them together if that trade is ever
+  revisited.
+- **Bubbles rest small and expand when they are doing something** — a feature
+  that is on but idle is a coin by the taskbar (Voice Control's mic, Page
+  Reader's play glyph, a one-glyph status light for Colour Blind / Dyslexia /
+  Cursor Size). It grows into a full bar or pill while it is listening,
+  reading or announcing a change, then folds back. `Bubble.animate_size`
+  drives the change and `Bubble.set_compact` tells the layout which shape a
+  bubble is currently in.
+- **The bottom-centre arrangement** (`Bubble.place_stacked`) is one row of all
+  the *compact* bubbles, side by side and centred as a group, with a row each
+  above it for whatever has expanded. It is recomputed from `feature_bus`
+  presence rather than from where the other bubbles currently are: "sit above
+  whatever is down there" makes two bubbles read each other's last position and
+  climb the screen together. Hidden bubbles hold no slot. Focus Mode sits
+  bottom-left and Tone Reader bottom-right, out of the row entirely.
+- **Animating a bubble's size on Windows is animating a window**, and the way
+  those calls are made is the whole difference between smooth and stepped:
+  `SetWindowPos` with `SWP_ASYNCWINDOWPOS` (a blocking one costs 30-110ms on a
+  WebView2 window, an async one under a millisecond), frames on a dedicated
+  thread rather than the feature's scheduler, and `timeBeginPeriod(1)` so a
+  16ms sleep is not the usual ~31ms. On macOS none of that applies: the window
+  is transparent and roomy, so the bubble is resized in CSS (`bbSize()`) and
+  the window is only ever made big enough to hold it.
+- **Page Reader reads like subtitles** — edge-tts is asked for
+  `boundary="WordBoundary"` (it defaults to sentence boundaries, which report
+  the whole line at once), the play thread turns those marks into
+  `Speaker.on_word` callbacks as the audio plays, and the bubble slides the
+  word being spoken under the centre of its strip.
+- **Windows bubbles are shaped windows, not transparent ones** — on macOS the
+  bubble floats inside a transparent window with a CSS drop shadow, and
+  `SHADOW_PAD_X/Y` is the invisible room that shadow falls into. WebView2
+  cannot do that: its surface composites opaque whatever it is told
+  (`DefaultBackgroundColor = Transparent`, the documented
+  `WEBVIEW2_DEFAULT_BACKGROUND_COLOR` variable, a magenta page keyed out with
+  `TransparencyKey`, the same key applied by hand with
+  `SetLayeredWindowAttributes` — every one measured leaving a rectangle, and
+  the keying attempts made it a *magenta* rectangle). `SetWindowRgn` is worse
+  than useless here: setting a region makes WebView2 abandon transparent
+  compositing and paint flat #202020 over the whole window. So on Windows the
+  window is sized to the bubble exactly (`SHADOW_PAD_* = 0`), the bubble's
+  surface is stretched edge to edge, and DWM rounds the window's own corners
+  (`DWMWA_WINDOW_CORNER_PREFERENCE`, `Bubble._apply_shape`) and draws the
+  shadow. `SetWindowRgn` is the obvious way to get a real capsule and does not
+  work: DirectComposition ignores the region, so WebView2 keeps painting the
+  square corners it cut — a pill with a black rectangle hanging off it. Bubbles
+  are therefore rounded rectangles on Windows and capsules on macOS. Two more Windows
+  facts live in the same code: pywebview floors every window at 200x100
+  (`MinimumSize`), which padded short bubbles into slabs, and it leaves the
+  process DPI-unaware, so window sizes are real pixels while the page lays out
+  in CSS pixels — hence `_fit_to_scale`.
 - **Why the bubbles are web views and not `tk.Canvas`** — a bubble has to
   *float*: a capsule or rounded card with a drop shadow over the user's real
   work, so everything outside its shape must be see-through. tkinter on macOS

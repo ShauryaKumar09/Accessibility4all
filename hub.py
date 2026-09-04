@@ -121,6 +121,9 @@ FEATURE_DATA = {
             {"key": "click_to_analyze", "label": "Shift+Click to analyze",
              "info": "Shift+Click any paragraph on a page to analyze it, "
                      "instead of only working on selected text."},
+            {"key": "read_aloud", "label": "Read the answer aloud",
+             "info": "Speaks the tone and explanation as soon as the card "
+                     "appears, using the same neural voice as Page Reader."},
         ],
         "shortcuts": [
             {"key": "analyze_selection", "label": "Analyze", "editable": True},
@@ -830,6 +833,16 @@ class Api:
 
     # ── shutdown ──
     def shutdown(self):
+        # Tear down the actual OS-level effects before killing the
+        # subprocesses, not just after — closing the app used `_stop` alone,
+        # which is `Popen.terminate()` (raw `TerminateProcess` on Windows,
+        # see `_apply_single_toggle`'s docstring), so a feature's own
+        # shutdown cleanup never ran. Focus Mode's hosts-file block in
+        # particular stayed in place, silently, until the hub was next
+        # launched — closing the app should unban sites, not just stop
+        # showing the countdown.
+        for feature_id in list(self._enabled):
+            self._apply_single_toggle(feature_id, False)
         for feat in self._features:
             self._stop(feat)
 

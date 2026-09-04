@@ -26,6 +26,8 @@ keyboard event taps is what crashed earlier versions on macOS).
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import os
 import signal
@@ -34,8 +36,11 @@ import threading
 import time
 from pathlib import Path
 
+import edge_tts
 import pyautogui
 import pyperclip
+import sounddevice as sd
+import soundfile as sf
 from dotenv import load_dotenv
 from groq import Groq
 from pynput import keyboard, mouse
@@ -91,9 +96,9 @@ OK = C["ON"]
 WARN = C["WARM_TEXT"]
 REC = C["STOP_BORDER"]
 
-CARD_W = 330
-CARD_PAD_X, CARD_PAD_Y = 16, 14
-CARD_GAP = 10
+CARD_W = 288
+CARD_PAD_X, CARD_PAD_Y = 13, 11
+CARD_GAP = 8
 SETTINGS_WATCH_MS = 700
 # Three named sizes replace the old free-form spinbox.
 TEXT_SIZES = store.TONE_TEXT_SIZES
@@ -112,15 +117,15 @@ BODY = """
 CSS = """
 #card   { width: %(W)dpx; padding: %(PY)dpx %(PX)dpx; gap: %(GAP)dpx; }
 #chip:empty { display: none; }
-#chip { font-size: 14px; padding: 4px 11px; }
+#chip { font-size: 12px; padding: 3px 9px; }
 #chip.neutral { background: %(CHIP)s; border-color: %(BORDER_CHIP)s;
                 color: %(FG_SECOND)s; font-weight: 400; }
-#answer { font-size: 19px; line-height: 1.4; color: var(--fg);
+#answer { font-size: 15px; line-height: 1.4; color: var(--fg);
           text-wrap: pretty; }
 /* A dismiss button does not need to be as prominent as the answer, and the
    card reads as less of a slab when it is not a full-width slab of button. */
-#got { height: 38px; font-size: 15px; border-width: 1px; border-radius: 10px;
-       align-self: flex-end; padding: 0 18px; }
+#got { height: 30px; font-size: 13px; border-width: 1px; border-radius: 8px;
+       align-self: flex-end; padding: 0 14px; }
 """ % {"W": CARD_W, "PX": CARD_PAD_X, "PY": CARD_PAD_Y, "GAP": CARD_GAP,
        "CHIP": C["CHIP"], "BORDER_CHIP": C["BORDER_CHIP"],
        "FG_SECOND": C["FG_SECOND"]}
@@ -205,6 +210,65 @@ def parse_combo(spec: str) -> frozenset[str]:
     return frozenset(toks)
 
 
+class SpeakOnce:
+    """Minimal killable TTS for a single utterance: the card's tone + answer.
+
+    page_reader's `Speaker` does far more than this needs (pause/resume,
+    per-line progress, a chunk-ahead pipeline for a whole scrolling page) and
+    lives in that feature's own process module, not `shared/`, so it isn't
+    something to import from here. The card only ever has one short thing to
+    say at a time, so this is just: synthesize on a worker thread, play on
+    another, and a generation counter so a new analysis (or a dismiss) cuts
+    off whatever was still talking instead of overlapping it.
+    """
+
+    def __init__(self, voice: str):
+        self._voice = voice
+        self._gen = 0
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, daemon=True).start()
+
+    def configure(self, voice: str):
+        self._voice = voice
+
+    def speak(self, text: str):
+        self.stop()
+        text = text.strip()
+        if not text:
+            return
+        gen = self._gen
+        asyncio.run_coroutine_threadsafe(self._speak(text, gen), self._loop)
+
+    async def _speak(self, text: str, gen: int):
+        try:
+            communicate = edge_tts.Communicate(text, voice=self._voice)
+            buf = bytearray()
+            async for chunk in communicate.stream():
+                if gen != self._gen:
+                    return
+                if chunk["type"] == "audio":
+                    buf.extend(chunk["data"])
+            if gen != self._gen or not buf:
+                return
+            data, sr_ = sf.read(io.BytesIO(bytes(buf)), dtype="float32")
+            if gen != self._gen:
+                return
+            sd.play(data, sr_)
+        except Exception as e:
+            log(f"read-aloud failed: {e}")
+
+    def stop(self):
+        self._gen += 1
+        try:
+            sd.stop()
+        except RuntimeError:               # nothing has ever been played
+            pass
+
+    def shutdown(self):
+        self.stop()
+        self._loop.call_soon_threadsafe(self._loop.stop)
+
+
 class ToneReaderApp:
     def __init__(self):
         self.settings = load_settings()
@@ -220,6 +284,8 @@ class ToneReaderApp:
         self._mouse_listener = None        # one mouse tap: Shift+Click (when enabled)
 
         self._groq: Groq | None = None
+        self._speaker = SpeakOnce(self.settings.get(
+            "tts_voice", store.DEFAULTS["tone_reader"]["tts_voice"]))
         self._last_analysis: dict | None = None
         self._busy = False
         self._visible = False
@@ -311,6 +377,7 @@ class ToneReaderApp:
 
     def hide_card(self):
         self._visible = False
+        self._speaker.stop()
         self.bubble.hide()
         self._ensure_mouse_listener()
 
@@ -330,6 +397,8 @@ class ToneReaderApp:
             self._combo_target = parse_combo(combo)
             self._combo_armed = False
             log(f"settings changed in the hub — hotkey={combo!r}")
+            self._speaker.configure(self.settings.get(
+                "tts_voice", store.DEFAULTS["tone_reader"]["tts_voice"]))
             self._ensure_mouse_listener()
             if self._visible and self._last_analysis:
                 self.show_card(self._last_analysis.get("tone", ""),
@@ -583,7 +652,10 @@ class ToneReaderApp:
         self.show_card("", "Reading the tone…", tone_color=False)
 
     def _render_analysis(self, data: dict):
-        self.show_card(data.get("tone", ""), data.get("answer", ""))
+        tone, answer = data.get("tone", ""), data.get("answer", "")
+        self.show_card(tone, answer)
+        if self.settings.get("read_aloud") and answer:
+            self._speaker.speak(f"{tone}. {answer}" if tone else answer)
 
     def _render_error(self, message: str, raw: str | None):
         if raw:
@@ -601,6 +673,7 @@ class ToneReaderApp:
             self._kbd_listener.stop()
         if self._mouse_listener:
             self._mouse_listener.stop()
+        self._speaker.shutdown()
         feature_bus.remove_presence("tone_reader")
         self._sched.stop()
         self.bubble.close()

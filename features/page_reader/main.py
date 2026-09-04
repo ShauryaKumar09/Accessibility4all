@@ -81,17 +81,17 @@ OK = C["ON"]
 WARN = C["WARM_TEXT"]
 REC = C["STOP_BORDER"]
 
-BUBBLE_H = 64
-BUTTON_D = 48
-COLUMN_W = 260
-PAD = 12
-GAP = 16
-WIN_W = PAD * 2 + BUTTON_D + GAP + COLUMN_W
-WIN_H = BUBBLE_H
+# Two shapes, one window. Idle it is a small oval by the taskbar — the play
+# glyph and the hotkey, nothing else. Reading, it grows into a subtitle bar
+# whose words run past as they are spoken. The window is the bubble on
+# Windows, so growing means growing the window (`Bubble.animate_size`); the
+# page only decides what is inside it.
+IDLE_W, IDLE_H = 46, 34        # resting: the play glyph, and nothing else
+READ_W, READ_H = 460, 52
+BUTTON_D = 28
+PAD = 8
+GAP = 10
 
-# The design's Page Reader bubble: one 48px button — pause or resume — the line
-# being read, and how far through it is. Nothing else; the three reading
-# options moved to the hub.
 BODY = """
 <div class="pill" id="pill">
   <div class="circle" id="btn">
@@ -99,31 +99,91 @@ BODY = """
     <span class="glyph-play"></span>
   </div>
   <div class="col">
-    <div class="label" id="line"></div>
+    <div class="strip" id="strip"><div class="words" id="words"></div></div>
     <div class="track"><i id="fill"></i></div>
   </div>
 </div>
 """
 CSS = """
-#pill { height: %(H)dpx; gap: %(GAP)dpx; padding: 0 %(PAD)dpx; }
-.col  { display: flex; flex-direction: column; gap: 6px; width: %(COL)dpx; }
+#pill { height: 100%; gap: 10px; padding: 0 8px; overflow: hidden; }
+.circle { width: 28px; height: 28px; cursor: pointer; }
+.col  { display: none; flex: 1; min-width: 0; flex-direction: column; gap: 5px; }
 
 /* one button, two faces: the triangle while idle or paused, the two bars
    while it is actually speaking */
-.glyph-pause { display: none; align-items: center; gap: 5px; }
-.glyph-pause i { display: block; width: 6px; height: 18px; border-radius: 2px;
+.glyph-pause { display: none; align-items: center; gap: 3px; }
+.glyph-pause i { display: block; width: 3px; height: 11px; border-radius: 2px;
                  background: var(--accent-on); }
-.glyph-play  { width: 0; height: 0; margin-left: 4px;
-               border-left: 15px solid var(--accent-on);
-               border-top: 9px solid transparent;
-               border-bottom: 9px solid transparent; }
+.glyph-play  { width: 0; height: 0; margin-left: 3px;
+               border-left: 9px solid var(--accent-on);
+               border-top: 6px solid transparent;
+               border-bottom: 6px solid transparent; }
 #btn.reading .glyph-pause { display: flex; }
 #btn.reading .glyph-play  { display: none; }
-""" % {"H": BUBBLE_H, "GAP": GAP, "PAD": PAD, "COL": COLUMN_W}
+
+/* The subtitle strip: one row of words that slides so the word being spoken
+   sits under the centre line. Only the strip moves — the window does not —
+   so this stays a compositor transition however long the line is. */
+.strip { position: relative; overflow: hidden; height: 22px;
+         -webkit-mask-image: linear-gradient(to right, transparent 0,
+                 #000 22px, #000 calc(100% - 22px), transparent 100%);
+                 mask-image: linear-gradient(to right, transparent 0,
+                 #000 22px, #000 calc(100% - 22px), transparent 100%); }
+.words { position: absolute; left: 0; top: 0; display: flex; gap: 7px;
+         white-space: nowrap; line-height: 22px; font-size: 15px;
+         color: var(--fg-second, #98a2b3);
+         transition: transform .28s var(--ease); will-change: transform; }
+.words span { transition: color .2s var(--ease), opacity .2s var(--ease);
+              opacity: .55; }
+.words span.said { opacity: .4; }
+.words span.now  { color: var(--fg-bubble); opacity: 1; font-weight: 600; }
+
+/* reading: the strip appears beside the button */
+.reading .col { display: flex; }
+/* resting, the button is the whole bubble */
+#pill { justify-content: center; }
+.reading #pill { justify-content: flex-start; }
+"""
 
 JS = """
 document.getElementById('btn').addEventListener('click',
   () => window.pywebview.api.toggle());
+
+const strip = document.getElementById('strip');
+const words = document.getElementById('words');
+let spans = [];
+
+/* Lay out the line one word per span, so the one being spoken can be picked
+   out and the strip slid to put it under the centre. */
+function setWords(list) {
+  words.style.transition = 'none';
+  words.style.transform = 'translateX(0)';
+  words.innerHTML = '';
+  spans = list.map(w => {
+    const el = document.createElement('span');
+    el.textContent = w;
+    words.appendChild(el);
+    return el;
+  });
+  void words.offsetWidth;             /* settle before transitions resume */
+  words.style.transition = '';
+  if (spans.length) setWord(0);
+}
+
+function setWord(i) {
+  if (!spans.length) return;
+  i = Math.max(0, Math.min(spans.length - 1, i));
+  spans.forEach((el, n) => {
+    el.classList.toggle('now', n === i);
+    el.classList.toggle('said', n < i);
+  });
+  /* Centre the current word, but never scroll past either end — a short line
+     should sit still rather than drift in from the side. */
+  const el = spans[i];
+  const want = el.offsetLeft + el.offsetWidth / 2 - strip.clientWidth / 2;
+  const max = Math.max(0, words.scrollWidth - strip.clientWidth);
+  words.style.transform = 'translateX(' + (-Math.max(0, Math.min(max, want))) + 'px)';
+}
 """
 
 
@@ -254,7 +314,8 @@ class Speaker:
         self._paused = False
         self._synthesizing = False
         self._playing = False
-        self.on_progress = None        # called from the play thread: (pos, total, text)
+        self.on_progress = None        # play thread: (pos, total, text, words)
+        self.on_word = None            # play thread: (index into that chunk's words)
         self._q: queue.Queue = queue.Queue()          # (pos, text, gen) to synthesize
         self._audio_q: queue.Queue = queue.Queue(maxsize=2)   # ready-to-play audio
         self._loop = asyncio.new_event_loop()
@@ -274,19 +335,33 @@ class Speaker:
         pct = max(-50, min(50, round((self._rate - 175) / 175 * 100)))
         return f"{pct:+d}%"
 
-    async def _synth(self, text: str) -> bytes:
-        communicate = edge_tts.Communicate(text, voice=self._voice, rate=self._edge_rate())
+    async def _synth(self, text: str) -> tuple[bytes, list[tuple[float, str]]]:
+        """The audio for one line, and when each word in it is spoken.
+
+        edge-tts sends a `WordBoundary` alongside the audio for every word,
+        timed in 100ns ticks from the start of the clip. Those are what let the
+        bubble run the words past like subtitles instead of showing a static
+        line — no second timing source, no guessing from word lengths.
+        """
+        # `boundary` defaults to SentenceBoundary, which reports the line as
+        # one event — useless for following along word by word.
+        communicate = edge_tts.Communicate(text, voice=self._voice,
+                                           rate=self._edge_rate(),
+                                           boundary="WordBoundary")
         buf = bytearray()
+        marks: list[tuple[float, str]] = []
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 buf.extend(chunk["data"])
-        return bytes(buf)
+            elif chunk["type"] == "WordBoundary":
+                marks.append((chunk["offset"] / 10_000_000, chunk["text"]))
+        return bytes(buf), marks
 
-    def _report(self, pos: int, text: str):
+    def _report(self, pos: int, text: str, words: list[str] | None = None):
         self._pos = pos
         if self.on_progress:
             try:
-                self.on_progress(pos, len(self._lines), text)
+                self.on_progress(pos, len(self._lines), text, words or [])
             except Exception:
                 pass
 
@@ -306,7 +381,7 @@ class Speaker:
                 continue
             self._synthesizing = True
             try:
-                mp3 = self._loop.run_until_complete(self._synth(text))
+                mp3, marks = self._loop.run_until_complete(self._synth(text))
                 data, sr_ = sf.read(io.BytesIO(mp3), dtype="float32")
             except Exception as e:
                 log(f"TTS synth error: {e}")
@@ -319,7 +394,7 @@ class Speaker:
             # moment a stop/pause bumps the generation.
             while gen == self._gen:
                 try:
-                    self._audio_q.put((pos, text, gen, data, sr_), timeout=0.1)
+                    self._audio_q.put((pos, text, gen, data, sr_, marks), timeout=0.1)
                     break
                 except queue.Full:
                     continue
@@ -329,12 +404,14 @@ class Speaker:
             item = self._audio_q.get()
             if item is self._STOP:
                 return
-            pos, text, gen, data, sr_ = item
+            pos, text, gen, data, sr_, marks = item
             if gen != self._gen:
                 continue
             self._playing = True
-            self._report(pos, text)
+            self._report(pos, text, [w for _, w in marks])
             sd.play(data * self._volume, sr_)
+            started = time.monotonic()
+            spoken = -1
             while True:
                 try:
                     stream = sd.get_stream()
@@ -345,6 +422,20 @@ class Speaker:
                 if gen != self._gen:
                     sd.stop()
                     break
+                # Which word is being said right now: the last one whose mark
+                # has gone by. The poll is already running at 30ms, which is
+                # finer than any word is short.
+                elapsed = time.monotonic() - started
+                i = spoken
+                while i + 1 < len(marks) and marks[i + 1][0] <= elapsed:
+                    i += 1
+                if i != spoken:
+                    spoken = i
+                    if self.on_word:
+                        try:
+                            self.on_word(spoken)
+                        except Exception:
+                            pass
                 time.sleep(0.03)
             self._playing = False
 
@@ -475,6 +566,8 @@ class PageReaderApp:
         self._register_hotkeys()
         self._update_hover_listener()
         self._start_bus_listener()
+        self.after(300, self._sync_shape)
+        self.after(1000, self._presence_loop)
         self.after(SETTINGS_WATCH_MS, self._watch_settings)
 
     # ── timers (what tkinter's after() used to give us) ──
@@ -501,9 +594,11 @@ class PageReaderApp:
         self._line = self._idle_line()
         self._fraction = 0.0
         self._line_color = C["FG_BUBBLE"]
+        self._reading_shape = False
         self._speaker.on_progress = self._on_progress
+        self._speaker.on_word = self._on_word
         self.bubble = wb.Bubble(
-            "Page Reader", BODY, WIN_W, WIN_H, css=CSS, js=JS,
+            "Page Reader", BODY, IDLE_W, IDLE_H, css=CSS, js=JS,
             api=_Api(lambda: self.after(0, self._on_button)),
             sched=self._sched, on_closed=self._sched.stop)
 
@@ -511,14 +606,35 @@ class PageReaderApp:
         return IDLE_LINE.format(key=self.settings["hotkeys"]["read_screen"])
 
     def _draw(self):
-        """Push the three things the bubble shows: the line, how far through it
-        is, and which face the button wears."""
-        self.bubble.set_text("line", self._line)
-        self.bubble.set_style("line", "color", self._line_color)
+        """Push what the bubble shows: how far through the reading is, and
+        which face the button wears."""
         self.bubble.set_style("fill", "width",
                               f"{max(0.0, min(1.0, self._fraction)) * 100:.1f}%")
         self.bubble.set_class("btn", "reading",
                               self._speaker.state() == "reading")
+
+    # ── the oval and the bar ──
+    def _sync_shape(self):
+        """Grow into the subtitle bar while reading, shrink back when done.
+
+        Polled rather than pushed: reading ends in several places (the last
+        line finishing, the stop hotkey, a voice command, a settings change),
+        and one check every 300ms is cheaper than keeping all of them in step.
+        """
+        want = self._speaker.state() != "idle"
+        if want != self._reading_shape:
+            self._reading_shape = want
+            self.bubble.set_compact(not want)
+            self.bubble.call("document.body.classList.%s('reading')"
+                             % ("add" if want else "remove"))
+            if want:
+                self.bubble.animate_size(READ_W, READ_H)
+            else:
+                self.bubble.animate_size(IDLE_W, IDLE_H)
+                self.bubble.call("setWords([])")
+                self._fraction = 0.0
+                self._draw()
+        self.after(300, self._sync_shape)
 
     def _on_button(self):
         """One button: pause what is being read, or start the screen fresh."""
@@ -533,14 +649,22 @@ class PageReaderApp:
                 self._set_status(self._line, C["FG_BUBBLE"])
         self._draw()
 
-    def _on_progress(self, pos: int, total: int, text: str):
-        """Called on the TTS thread — marshal onto the main thread."""
+    def _on_progress(self, pos: int, total: int, text: str, words: list[str]):
+        """A new line started. Called on the TTS thread — marshal over."""
         def _apply():
             self._line = text
             self._line_color = C["FG_BUBBLE"]
             self._fraction = (pos + 1) / total if total else 0.0
+            # Fall back to splitting the line ourselves if the voice sent no
+            # word marks, so the strip still shows the line being read.
+            self.bubble.call("setWords(%s)"
+                             % json.dumps(words or text.split()))
             self._draw()
         self.after(0, _apply)
+
+    def _on_word(self, index: int):
+        """The next word is being spoken. Also from the TTS thread."""
+        self.after(0, lambda: self.bubble.call(f"setWord({index})"))
 
     def _watch_settings(self):
         """Pick up edits the hub made to settings.json while we were running."""
@@ -558,21 +682,38 @@ class PageReaderApp:
         self.after(SETTINGS_WATCH_MS, self._watch_settings)
 
     def _set_status(self, msg: str, color: str = MUTED):
+        """Put a line of state in the bubble.
+
+        There is only room for it while the bubble is the wide reading bar —
+        the idle oval carries the hotkey and nothing else — so a status
+        arriving while collapsed is shown in the strip only if the bar is (or
+        is about to be) open. Nothing is lost that the terminal does not also
+        have.
+        """
         def _apply():
             self._line = msg
             self._line_color = color
             if self._speaker.state() == "idle" and color in (OK, MUTED):
                 self._fraction = 0.0
+            if self._reading_shape:
+                self.bubble.call("setWords(%s)" % json.dumps(msg.split()))
             self._draw()
         self.after(0, _apply)
 
     def _position_window(self):
-        """Bottom-centre, stacked above the Voice Control bubble when it's up."""
-        self.bubble.place_stacked("page_reader")
+        """Bottom-centre, above whatever else is down there — and it keeps
+        checking, because the other bubbles come and go."""
+        self.bubble.keep_stacked("page_reader")
         self._update_presence()
 
     def _update_presence(self):
         feature_bus.update_presence("page_reader", os.getpid(), self.bubble.rect())
+
+    def _presence_loop(self):
+        """The bubble changes size as it reads, and its neighbours stack on
+        top of whatever it last claimed — so keep the claim current."""
+        self._update_presence()
+        self.after(1000, self._presence_loop)
 
     def _register_hotkeys(self):
         if self._hotkey_listener:

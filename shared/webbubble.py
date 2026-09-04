@@ -26,17 +26,63 @@ What a feature gets from here:
   the handful of pieces every bubble is built from — `.pill`, `.card`, `.dot`,
   `.label`, `.chip`, `.circle`, `.track`, `.btn`.
 
-Sizes here are logical points, which is what the design's px values mean.
+Sizes here are CSS pixels, which is what the design's px values mean. On
+Windows the window is then made `devicePixelRatio` times bigger in real pixels
+(`Bubble._fit_to_scale`) so the page gets the room the design assumed, and
+every placement number goes through `Bubble._px` for the same reason.
+
+Windows draws these differently from macOS, and the difference is not
+cosmetic. Cocoa composites real per-pixel alpha, so there the window is
+transparent, the bubble floats inside it with its CSS drop shadow, and the
+padding around it (`SHADOW_PAD_*`) is invisible. WebView2 does not: its
+surface was measured painting opaque no matter what it is asked for, so on
+Windows the window IS the bubble — no padding, the bubble stretched edge to
+edge, its rounded corners cut out of the window by DWM, and DWM's own shadow
+in place of the CSS one. `page()` and `Bubble._apply_shape` carry the
+detail, including the several things that look like they should work and put
+the box straight back.
 """
 
 from __future__ import annotations
 
 import heapq
 import json
+import os
 import sys
 import threading
 import time
 from pathlib import Path
+
+if sys.platform == "win32":
+    # THE fix for the opaque box behind every bubble on Windows.
+    #
+    # pywebview asks for transparency by setting the WebView2 control's
+    # `DefaultBackgroundColor` to `Color.Transparent`. That property is known
+    # to be unreliable — it reads back as transparent (`A=0`) while the
+    # surface still composites opaque, which is exactly what was measured
+    # here: raw `GetPixel` on the window's own DC returned Chromium's default
+    # page background (#121212), and the bubble sat on a rectangle of it.
+    # Microsoft documents an environment variable as the way to set this
+    # before the WebView2 environment is created, precisely because the API
+    # path misbehaves (it is also their documented fix for the white flash
+    # the API leaves before it takes effect).
+    #
+    # Format is AARRGGBB, and 00 alpha means transparent — so 00FFFFFF is a
+    # fully transparent backdrop. This must be set before ANY window is
+    # created (hence module import time), and only if the user hasn't set
+    # their own value.
+    os.environ.setdefault("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "00FFFFFF")
+
+    # Windows' default timer resolution is ~15.6ms, so a 16ms sleep actually
+    # takes about 31 — which turns a resize animation into six visible steps.
+    # Asking for 1ms makes the scheduler's frames land when they are meant to.
+    try:
+        import ctypes
+
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
+
 
 import webview
 
@@ -47,12 +93,20 @@ if str(ROOT) not in sys.path:
 from shared import feature_bus  # noqa: E402
 from shared.ui_kit import C    # noqa: E402
 
-# Room left around a bubble inside its window for the drop shadow. The window
-# is transparent, so this is invisible — but it is real estate that swallows
-# clicks, which is why bubbles are sized to their content and no larger.
-SHADOW_PAD_X = 40
-SHADOW_PAD_Y = 30
-BOTTOM_GAP = 72          # a bottom-centred bubble's distance from the edge
+# Room left around a bubble inside its window for the drop shadow.
+#
+# macOS gets it: the window is genuinely transparent there, so the padding is
+# invisible and the shadow can spill into it.
+#
+# Windows gets none, because the window is NOT transparent there — see
+# `page()`. Any padding would be opaque background, which is the box. The
+# bubble is the window instead, its rounded corners cut out of the window
+# itself (`Bubble._apply_shape`), and the CSS drop shadow with it — DWM
+# draws its own shadow around the window instead.
+_WIN = sys.platform == "win32"
+SHADOW_PAD_X = 0 if _WIN else 34
+SHADOW_PAD_Y = 0 if _WIN else 40
+BOTTOM_GAP = 10          # a bottom-centred bubble's gap above the taskbar
 STACK_GAP = 12           # between two bubbles that are up at the same time
 
 # Bottom-up order for bubbles that share the bottom-centre spot. A feature that
@@ -65,6 +119,11 @@ STACK_ORDER = ["voice_control", "page_reader", "focus_mode",
 
 # Shared timing. One easing curve and one duration family keeps every bubble
 # moving the same way.
+# What the window is filled with before the page paints. The bubble's own
+# colour, so the moment between the window appearing and the page rendering
+# looks like the bubble rather than a flash of something else.
+BACKDROP_KEY = C["BUBBLE"]
+
 EASE = "cubic-bezier(.22,.61,.36,1)"
 FADE_MS = 200            # how long a bubble takes to fade itself out
 
@@ -91,6 +150,13 @@ BASE_CSS = """
 }
 * { box-sizing: border-box; }
 html, body {
+  /* `transparent` here is only correct on macOS, where Cocoa composites real
+     per-pixel alpha. On Windows it is a trap: the page ends up painting
+     Chromium's own default page background (measured: #121212) because
+     WebView2's `DefaultBackgroundColor` is ignored by the runtime, and an
+     opaque #121212 rectangle is exactly the "box" around the bubble. The
+     Windows build therefore paints the colour key itself, in CSS, where
+     Chromium cannot ignore it — see `page()`, which swaps this per platform. */
   margin: 0; height: 100%%; background: transparent; overflow: hidden;
   -webkit-user-select: none; user-select: none; cursor: default;
   font-family: -apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -104,8 +170,20 @@ body { display: flex; align-items: center; justify-content: center; }
   animation: bb-in .26s var(--ease) both;
   transition: opacity %(FADE_MS)dms var(--ease),
               transform %(FADE_MS)dms var(--ease);
+  /* `will-change` only — deliberately NOT `translateZ(0)` /
+     `backface-visibility`. Those force WebView2 to allocate an OPAQUE backing
+     layer for the stage, which paints a black rectangle over the window's
+     keyed-out background and puts the "white box" back as a black one. The
+     opacity/transform transitions below are already compositor-driven. */
+  will-change: opacity, transform;
 }
-#stage.leaving { opacity: 0; transform: translateY(6px) scale(.97); }
+/* Beat the still-attached `bb-in` animation, which otherwise holds the
+   entrance's final transform and leaves the exit with nothing to animate. */
+#stage.leaving {
+  opacity: 0;
+  transform: translateY(6px) scale(.97);
+  animation: none;
+}
 @keyframes bb-in {
   from { opacity: 0; transform: translateY(10px) scale(.96); }
   to   { opacity: 1; transform: none; }
@@ -117,33 +195,33 @@ body { display: flex; align-items: center; justify-content: center; }
   border-radius: 999px;
   background: var(--bubble);
   border: 1px solid var(--border);
-  box-shadow: 0 14px 34px rgba(0,0,0,.55), 0 2px 5px rgba(0,0,0,.4);
+  box-shadow: 0 8px 20px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.35);
 }
 .card {
   display: flex; flex-direction: column;
-  border-radius: 16px;
+  border-radius: 12px;
   background: var(--bubble);
   border: 1px solid var(--border);
-  box-shadow: 0 18px 44px rgba(0,0,0,.6), 0 2px 6px rgba(0,0,0,.45);
+  box-shadow: 0 10px 26px rgba(0,0,0,.5), 0 1px 4px rgba(0,0,0,.4);
 }
 .dot {
-  flex: none; width: 12px; height: 12px; border-radius: 50%%;
+  flex: none; width: 9px; height: 9px; border-radius: 50%%;
   background: var(--dot, var(--on));
   transition: background .25s var(--ease);
 }
 .label {
-  font-size: 17px; line-height: 1.2; color: var(--fg-bubble);
+  font-size: 14px; line-height: 1.2; color: var(--fg-bubble);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: color .22s var(--ease);
 }
 .chip {
-  align-self: flex-start; font-size: 17px; font-weight: 600;
-  padding: 6px 14px; border-radius: 999px;
+  align-self: flex-start; font-size: 13px; font-weight: 600;
+  padding: 4px 10px; border-radius: 999px;
   background: var(--chip-bg); border: 1px solid var(--chip-border);
   color: var(--chip-fg);
 }
 .circle {
-  flex: none; width: 48px; height: 48px; border-radius: 50%%;
+  flex: none; width: 34px; height: 34px; border-radius: 50%%;
   display: flex; align-items: center; justify-content: center;
   cursor: pointer;
   background: var(--accent-fill); border: 2px solid var(--accent);
@@ -152,16 +230,16 @@ body { display: flex; align-items: center; justify-content: center; }
 }
 .circle:active { transform: scale(.94); }
 .track {
-  height: 5px; border-radius: 3px; background: var(--track); overflow: hidden;
+  height: 4px; border-radius: 2px; background: var(--track); overflow: hidden;
 }
 .track > i {
-  display: block; height: 5px; border-radius: 3px; background: var(--accent);
+  display: block; height: 4px; border-radius: 2px; background: var(--accent);
   width: 0; transition: width .3s var(--ease);
 }
 .btn {
-  height: 52px; display: flex; align-items: center; justify-content: center;
-  border-radius: 12px; border: 2px solid var(--border);
-  background: var(--inset); font-size: 18px; color: var(--fg);
+  height: 38px; display: flex; align-items: center; justify-content: center;
+  border-radius: 10px; border: 1px solid var(--border);
+  background: var(--inset); font-size: 14px; color: var(--fg);
   cursor: pointer;
   transition: border-color .18s var(--ease), background .18s var(--ease),
               transform .18s var(--ease);
@@ -173,10 +251,52 @@ body { display: flex; align-items: center; justify-content: center; }
 
 def page(body: str, css: str = "", js: str = "") -> str:
     """Wrap a bubble's markup in the shared stylesheet, stage and helpers."""
-    tokens = dict(C, EASE=EASE, FADE_MS=FADE_MS)
+    tokens = dict(C, EASE=EASE, FADE_MS=FADE_MS, BACKDROP_KEY=BACKDROP_KEY)
+    # How the window stops being a rectangle differs by platform.
+    #
+    # macOS composites real per-pixel alpha: a page with no background is a
+    # window with no background, so the bubble floats with its drop shadow and
+    # the padding around it is invisible.
+    #
+    # Windows cannot do that here. WebView2 draws through DirectComposition,
+    # and its surface was measured painting opaque whatever it is asked for —
+    # `DefaultBackgroundColor = Transparent`, the documented
+    # `WEBVIEW2_DEFAULT_BACKGROUND_COLOR` variable, a magenta page keyed out
+    # with `TransparencyKey`, the same key applied by hand with
+    # `SetLayeredWindowAttributes`: every one of them left a rectangle behind
+    # the bubble, and the keying attempts made it a magenta rectangle rather
+    # than none. So on Windows the window IS the bubble: no padding, the
+    # bubble's own surface stretched edge to edge, and the rounded corners cut
+    # cut out of the window itself (see `Bubble._apply_shape`). There is nothing
+    # left over to paint a box with.
+    if sys.platform == "win32":
+        body_css = (
+            "html, body { background: transparent !important; }"
+            "#stage { width: 100%; height: 100%; }"
+            # The bubble fills the window, so its shadow would have nowhere
+            # to fall and its border would be half-clipped by the window edge.
+            # The radius matches DWM's rounding (`Bubble._apply_shape`): a
+            # capsule's 999px corners would leave wedges of bare window either
+            # side of the bubble, which is the box in miniature.
+            "#stage > * { width: 100% !important; height: 100% !important;"
+            " box-shadow: none !important; border: 0 !important;"
+            " border-radius: 8px !important; }"
+        )
+    else:
+        # macOS: the window is genuinely transparent and has room around the
+        # bubble for its shadow, so the bubble is sized here rather than by the
+        # window — `bbSize()` moves these two variables and the transition runs
+        # on the compositor. `#stage > *` fills the stage so a feature's own
+        # `height: 100%` means the same thing on both platforms.
+        body_css = (
+            "html, body { background: transparent !important; }"
+            "#stage { width: var(--bw, auto); height: var(--bh, auto);"
+            " transition: width .22s var(--ease), height .22s var(--ease); }"
+            "#stage > * { width: 100%; height: 100%; }"
+        )
     return (
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><style>"
-        + (BASE_CSS % tokens) + css
+        + (BASE_CSS % tokens) + css + body_css
         + "</style></head><body><div id=\"stage\">" + body + "</div>"
         + "<script>" + STAGE_JS + js + "</script>"
         + "</body></html>"
@@ -220,6 +340,52 @@ def screen_size() -> tuple[int, int]:
         return int(s.width / scale), int(s.height / scale)
     except Exception:
         return 1440, 900
+
+
+def work_area() -> tuple[int, int]:
+    """The usable bottom-right corner of the primary display, in real pixels.
+
+    Bubbles sit just above the taskbar, and the taskbar is not part of the work
+    area — so this is what "near the bottom of the screen" is measured from.
+
+    Windows answers this one in the same virtualised units it gives every
+    DPI-unaware process (1536x864 on a 1920x1080 display at 125%), while
+    windows are placed in real pixels, so the reserved strip is scaled up
+    before it is subtracted. Falls back to the whole screen, which only costs
+    a bubble a taskbar's worth of margin.
+    """
+    sw, sh = screen_size()
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSScreen
+
+            screen = NSScreen.mainScreen()
+            frame, visible = screen.frame(), screen.visibleFrame()
+            # Cocoa measures from the bottom-left and window positions are
+            # measured from the top, so the usable bottom edge is the screen
+            # height less whatever the Dock takes — which is exactly the
+            # visible frame's y origin.
+            return int(visible.size.width), int(frame.size.height - visible.origin.y)
+        except Exception:
+            return sw, sh
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            SPI_GETWORKAREA, SM_CXSCREEN, SM_CYSCREEN = 0x0030, 0, 1
+            rect = wintypes.RECT()
+            user32 = ctypes.windll.user32
+            if user32.SystemParametersInfoW(
+                    SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+                logical_w = user32.GetSystemMetrics(SM_CXSCREEN)
+                logical_h = user32.GetSystemMetrics(SM_CYSCREEN)
+                if logical_w and logical_h:
+                    kx, ky = sw / logical_w, sh / logical_h
+                    return int(rect.right * kx), int(rect.bottom * ky)
+        except Exception:
+            pass
+    return sw, sh
 
 
 class Scheduler:
@@ -299,22 +465,42 @@ class Bubble:
         self.w = width + SHADOW_PAD_X
         self.h = height + SHADOW_PAD_Y
         self.content_w, self.content_h = width, height
-        sw, sh = screen_size()
-        self.x = max(0, (sw - self.w) // 2)
-        self.y = max(0, sh - self.h - BOTTOM_GAP)
+        # Real pixels per CSS pixel for this window — 1.0 until the page says
+        # otherwise (see `_fit_to_scale`). Placement is in real pixels, so
+        # every size used to position a bubble goes through `_px`.
+        self.scale = 1.0
+        self._place_default(move=False)
         self._visible = not hidden
         self._ready = threading.Event()
         self._on_closed = on_closed
         self._sched = sched
         self._hide_at: int | None = None
+        self._transparency_wired = False
+        self._hwnd: int | None = None
+        # Whether the bubble is in its small resting form. Compact bubbles
+        # share one row along the bottom; expanded ones get a row each.
+        self._compact = True
+        self._size_gen = 0
+        self._last_w, self._last_h = self.w, self.h
         self.window = webview.create_window(
             title, html=page(body, css, js),
             width=self.w, height=self.h, x=self.x, y=self.y,
             frameless=True, transparent=True, on_top=True, resizable=False,
-            easy_drag=False, background_color="#000000", hidden=hidden,
+            easy_drag=False, background_color=BACKDROP_KEY, hidden=hidden,
             js_api=api,
         )
         self.window.events.closed += self._closed
+
+    def _place_default(self, move: bool = True):
+        """Bottom-centre: where a bubble sits until a feature places it."""
+        sw, sh = work_area()
+        x = max(0, (sw - self._px(self.w)) // 2)
+        y = max(0, sh - self._px(self.h) - BOTTOM_GAP)
+        self._default_pos = (x, y)
+        if move:
+            self.move(x, y)
+        else:
+            self.x, self.y = x, y
 
     # ── lifecycle ──
     def run(self, on_started=None):
@@ -322,44 +508,163 @@ class Bubble:
         def _boot():
             self._ready.set()
             self._make_really_transparent()
+            self._fit_to_scale()
+            self._apply_shape()
+            if sys.platform != "win32":
+                # The stage is sized in CSS there; start it at the size the
+                # bubble was created with.
+                self.call(f"bbSize({self.content_w}, {self.content_h})")
             self._enforce_hidden()
             if on_started:
                 on_started()
         webview.start(_boot, private_mode=True)
 
-    def _make_really_transparent(self):
-        """Actually let the desktop show through the corners of the bubble.
+    def _make_really_transparent(self, attempt: int = 0):
+        """Re-assert the transparent browser backdrop once the runtime is up.
 
-        pywebview asks WebView2 to paint transparently but never changes the
-        window's own background, which stays the default light control
-        colour. The rounded pill then sits on a visible pale rectangle —
-        reported as "a cut-off white box with the bubble on top of it".
+        pywebview already asks for a transparent window, and on Windows that
+        is what actually works: the WebView2 surface composites with real
+        alpha, so a page with no background leaves the desktop showing.
 
-        Giving the form a transparency key makes those pixels genuinely
-        absent: the shape floats, and clicks pass through the empty corners
-        instead of being swallowed by an invisible rectangle. Magenta is the
-        conventional key colour precisely because no real UI uses it, so
-        nothing in the bubble can be keyed out by accident.
+        What does NOT work — measured, repeatedly — is helping it along by
+        keying the window out. Painting the form (or the page) magenta and
+        setting `TransparencyKey` puts the box back rather than removing it,
+        because WebView2 draws through DirectComposition and a layered
+        window's colour key never reaches those pixels: the bubble ends up on
+        a magenta rectangle instead of a dark one. Do not reintroduce it.
+
+        All that is left here is one belt-and-braces write. pywebview sets
+        `DefaultBackgroundColor` before `EnsureCoreWebView2Async`, where the
+        value can be discarded, and then sets it on the EdgeChrome *wrapper*
+        instead of the control it holds, which does nothing at all. Setting it
+        on the real control after `CoreWebView2` exists is the assignment that
+        is guaranteed to stick.
+
+        The waits are existence checks, not timing guesses: the form is built
+        on another thread, and `CoreWebView2` is null until the runtime has
+        started. Both are read on the UI thread — touching a WinForms
+        control's properties from the scheduler thread wedged the window
+        outright, leaving the page unloaded and every later `evaluate_js`
+        blocked forever.
         """
-        if sys.platform != "win32":
+        if sys.platform != "win32" or self._transparency_wired:
             return                # Cocoa composites transparency properly
         try:
             from System import Action
-            from System.Drawing import Color
+            from System.Drawing import Color, Size
             from webview.platforms.winforms import BrowserView
 
             form = BrowserView.instances.get(self.window.uid)
             if form is None:
+                self._retry_transparency(attempt)
                 return
 
-            def _apply():
-                form.BackColor = Color.Magenta
-                form.TransparencyKey = Color.Magenta
+            done = []
 
-            form.Invoke(Action(_apply))          # must run on the UI thread
+            def _apply():
+                control = getattr(getattr(form, "browser", None), "webview", None)
+                if control is None or control.CoreWebView2 is None:
+                    return                       # not up yet; caller retries
+                control.DefaultBackgroundColor = Color.Transparent
+                # pywebview floors every window at 200x100 (`MinimumSize`),
+                # so a 46px-tall pill was handed a 100px-tall window and the
+                # leftover 54px were painted as background — a bubble sitting
+                # in a slab. Clearing the floor and re-applying the size the
+                # bubble actually asked for is what makes the window the same
+                # shape as the bubble.
+                self._hwnd = int(str(form.Handle))
+                form.MinimumSize = Size(0, 0)
+                form.ClientSize = Size(self.w, self.h)
+                done.append(True)
+
+            if form.InvokeRequired:
+                form.Invoke(Action(_apply))      # must run on the UI thread
+            else:
+                _apply()
+
+            if done:
+                self._transparency_wired = True
+            else:
+                self._retry_transparency(attempt)
         except Exception as e:
             # Not fatal: the bubble still works, it just keeps its backdrop.
             print(f"[webbubble] transparent background unavailable: {e}", flush=True)
+
+    def _retry_transparency(self, attempt: int):
+        """Look again shortly — up to about ten seconds."""
+        if attempt < 200 and self._sched:
+            self._sched.after(
+                50, lambda: self._make_really_transparent(attempt + 1))
+
+    def _fit_to_scale(self):
+        """Give the page as many CSS pixels as the bubble's geometry assumes.
+
+        A bubble is written in CSS pixels, and WebView2 lays the page out with
+        the display's scale factor applied — so on a 125% display a 262px-wide
+        window has only 210 CSS pixels of room, and a line of text measured to
+        fit ends up ellipsised. The window is therefore made `devicePixelRatio`
+        times bigger in real pixels, which is also what makes a bubble the same
+        apparent size as everything else on a scaled desktop.
+
+        The ratio is read from the page. `GetDpiForMonitor` looks like the
+        tidier source and is not usable: pywebview leaves the process
+        DPI-unaware, so Windows answers 96 for every monitor however it is
+        scaled.
+        """
+        if sys.platform != "win32":
+            return          # Cocoa sizes windows in points; a Retina ratio of
+                            # 2 here would double every bubble
+        try:
+            ratio = float(self.window.evaluate_js("window.devicePixelRatio") or 1)
+        except Exception:
+            return
+        if ratio <= 1.01:
+            return
+        want = (int(round(self.w * ratio)), int(round(self.h * ratio)))
+        try:
+            self.window.resize(*want)
+            self.scale = ratio
+            if (self.x, self.y) == self._default_pos:
+                # The constructor placed the bubble before the scale was
+                # known, so the bottom-centre default was computed from CSS
+                # pixels and sat too low. Re-place it now, unless the feature
+                # has already put it somewhere of its own choosing.
+                self._place_default()
+        except Exception as e:
+            print(f"[webbubble] could not fit window to scale: {e}", flush=True)
+
+    # ── shape ──
+    def _apply_shape(self):
+        """Round the window's corners so the bubble is not a rectangle.
+
+        DWM, not `SetWindowRgn`. A window region looks like the exact answer —
+        it would give a real capsule instead of DWM's fixed 8px corners — and
+        it does not work here: WebView2 draws through DirectComposition, which
+        the region does not clip, so the browser surface keeps painting the
+        square corners the region just cut away. What that looks like on
+        screen is a rounded pill with a black rectangle hanging off it.
+
+        DWM's rounding happens at composition, after WebView2 has drawn, which
+        is why it is the one thing that survives. The cost is that a bubble is
+        a rounded rectangle rather than a capsule on Windows; on macOS the
+        window is genuinely transparent and CSS decides the shape.
+
+        Windows 10 has no corner preference and returns a failure code, which
+        is fine: the bubble is then square-cornered and nothing else changes.
+        """
+        if sys.platform != "win32" or not self._hwnd:
+            return
+        try:
+            import ctypes
+
+            DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            DWMWCP_ROUND = 2
+            pref = ctypes.c_int(DWMWCP_ROUND)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                self._hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                ctypes.byref(pref), ctypes.sizeof(pref))
+        except Exception as e:
+            print(f"[webbubble] could not round corners: {e}", flush=True)
 
     def _enforce_hidden(self):
         """Undo pywebview showing a transparent window we asked to stay hidden.
@@ -405,6 +710,11 @@ class Bubble:
                 self.window.show()
             except Exception:
                 pass
+            # Showing the window again can drop the shape, so re-cut it.
+            # Only that: the rest of the window setup runs once, and re-running
+            # it here resized the window back to its unscaled size every time
+            # a bubble was re-shown.
+            self._apply_shape()
         self._raise_above_everything()
         if for_ms and self._sched:
             self._hide_at = self._sched.after(for_ms, self.hide)
@@ -461,14 +771,21 @@ class Bubble:
     # ── placing ──
     def move(self, x: int, y: int):
         self.x, self.y = int(x), int(y)
+        # Where the bubble is now is also what a size animation anchors to.
+        self._last_w, self._last_h = self.w, self.h
         try:
             self.window.move(self.x, self.y)
         except Exception:
             pass
 
+    def _px(self, css: int) -> int:
+        """A CSS length in the real pixels the window is placed with."""
+        return int(round(css * self.scale))
+
     def place_bottom_center(self, bottom_gap: int = BOTTOM_GAP):
-        sw, sh = screen_size()
-        self.move(max(0, (sw - self.w) // 2), max(0, sh - self.h - bottom_gap))
+        sw, sh = work_area()
+        self.move(max(0, (sw - self._px(self.w)) // 2),
+                  max(0, sh - self._px(self.h) - bottom_gap))
 
     def place_bottom_right(self, bottom_gap: int = BOTTOM_GAP,
                            side_gap: int = BOTTOM_GAP):
@@ -478,38 +795,258 @@ class Bubble:
         predictable and never lands on top of the thing they were reading,
         which is what following the pointer did.
         """
-        sw, sh = screen_size()
-        self.move(max(0, sw - self.w - side_gap), max(0, sh - self.h - bottom_gap))
+        sw, sh = work_area()
+        self.move(max(0, sw - self._px(self.w) - side_gap),
+                  max(0, sh - self._px(self.h) - bottom_gap))
+
+    def set_compact(self, compact: bool):
+        """Say whether the bubble is currently in its small resting form.
+
+        Two collapsed bubbles sit beside each other rather than one above the
+        other — there is no reason for two pills the size of a coin to take
+        two rows — so the layout needs to know which shape each one is in.
+        """
+        self._compact = bool(compact)
+
+    def place_bottom_left(self, bottom_gap: int = BOTTOM_GAP,
+                          side_gap: int = 16):
+        """Park the bubble in the bottom-left corner.
+
+        For a bubble that is a status light rather than a conversation: it
+        stays out of the bottom-centre pile the other features share, so it
+        never pushes them around as it grows and shrinks.
+        """
+        _, sh = work_area()
+        self.move(side_gap, max(0, sh - self._px(self.h) - bottom_gap))
 
     def place_stacked(self, feature_id: str):
-        """Bottom-centre, but above any bubble that is already down there.
+        """Put this bubble in its place in the bottom-centre arrangement.
 
-        Several features can be on at once, and every one of them wants the
-        same spot. Presence (`feature_bus`) says which bubbles are actually up
-        and where their drawn shapes are, so each new one sits on top of the
-        pile rather than on top of another bubble.
+        The arrangement, from the taskbar up:
+
+        * one bottom row holding every bubble that is in its small resting
+          form, side by side and centred as a group — two coin-sized pills do
+          not need two rows of screen;
+        * a row each, above that, for every bubble that has expanded, in
+          `STACK_ORDER`.
+
+        It is worked out from scratch every time, from who is actually up
+        (`feature_bus` presence, skipping hidden bubbles) rather than from
+        where anyone currently is. "Sit above whatever is already down there"
+        reads the other bubble's last position, so two bubbles each move above
+        the other and the pile climbs the screen a step at a time — which is
+        how the Page Reader bubble ended up floating in mid-air with nothing
+        beneath it.
         """
-        sw, sh = screen_size()
-        top = sh - BOTTOM_GAP - self.content_h          # the bottom slot
-        presence = feature_bus.load_presence()
-        for other in STACK_ORDER:
-            if other == feature_id:
-                break
-            info = presence.get(other)
-            if not info or not feature_bus.is_feature_running(other):
+        sw, sh = work_area()
+        me = {"w": self._px(self.w), "h": self._px(self.h),
+              "compact": self._compact}
+        others = self._live_neighbours(feature_id)
+
+        def rank(fid: str) -> tuple[int, str]:
+            # Anything not in the list sorts after everything that is, stably,
+            # so a new feature needs no change here to behave.
+            return (STACK_ORDER.index(fid) if fid in STACK_ORDER
+                    else len(STACK_ORDER), fid)
+
+        row = [(fid, win) for fid, win in others.items() if win.get("compact")]
+        if me["compact"]:
+            row.append((feature_id, me))
+        row.sort(key=lambda item: rank(item[0]))
+        row_h = max((win["h"] for _, win in row), default=0)
+        bottom = sh - BOTTOM_GAP
+
+        if me["compact"]:
+            # Centre the whole row as a group, then take my slot in it.
+            total = sum(win["w"] for _, win in row) + STACK_GAP * (len(row) - 1)
+            x = (sw - total) // 2
+            for fid, win in row:
+                if fid == feature_id:
+                    break
+                x += win["w"] + STACK_GAP
+            # Bubbles in the row are bottom-aligned, so a taller one does not
+            # make the shorter ones look like they are floating.
+            self.move(max(0, x), max(0, bottom - me["h"]))
+            return
+
+        # Expanded: a row of my own, above the compact row and above every
+        # expanded bubble that sorts before me.
+        top = bottom - (row_h + STACK_GAP if row else 0)
+        for fid, win in sorted(others.items(), key=lambda item: rank(item[0])):
+            if win.get("compact") or rank(fid) >= rank(feature_id):
+                continue
+            top -= win["h"] + STACK_GAP
+        self.move(max(0, (sw - me["w"]) // 2), max(0, top - me["h"]))
+
+    def _live_neighbours(self, feature_id: str) -> dict:
+        """The other features' bubbles that are actually on screen."""
+        out = {}
+        for other, info in feature_bus.load_presence().items():
+            if other == feature_id or not info:
+                continue
+            win = info.get("window") or {}
+            if not win.get("visible", True) or "h" not in win or "w" not in win:
                 continue
             if "started_at" not in info:
                 # Written by a build before presence carried a timestamp, or
-                # left behind by a process that died without cleaning up. The
-                # PID check above can be fooled by PID reuse, so an entry we
-                # cannot date is not trustworthy enough to stack against.
+                # left by a process that died without cleaning up. The PID
+                # check can be fooled by PID reuse, so an entry we cannot date
+                # is not trustworthy enough to arrange around.
                 continue
-            win = info.get("window") or {}
-            if "y" in win and "h" in win:
-                top = min(top, win["y"] - STACK_GAP - self.content_h)
-        x = max(0, (sw - self.w) // 2)
-        y = max(0, top - (self.h - self.content_h) // 2)
-        self.move(x, y)
+            if not feature_bus.is_feature_running(other):
+                continue
+            out[other] = win
+        return out
+
+    def keep_stacked(self, feature_id: str, every_ms: int = 900):
+        """Re-place this bubble whenever the pile below it changes.
+
+        Bubbles come and go while the hub is running, and a bubble that was
+        placed above another one stays there long after that other one is
+        gone — which is how a lone Page Reader ended up floating in the middle
+        of the screen. Cheap to run: reading `presence.json` is a few
+        kilobytes, and the window is only moved when the answer changes.
+        """
+        if not self._sched:
+            return
+        self.place_stacked(feature_id)
+        self._sched.after(every_ms, lambda: self.keep_stacked(feature_id, every_ms))
+
+    # ── growing and shrinking ──
+    def animate_size(self, width: int, height: int, ms: int = 200,
+                     on_done=None, anchor: str = "bottom-center"):
+        """Grow or shrink the bubble, keeping the edge it is anchored to.
+
+        The two platforms get there differently, because their windows are
+        different things (see `page()`).
+
+        **macOS** — the window is transparent and has room around the bubble,
+        so the bubble is resized in CSS and the transition runs on the
+        compositor. The window is only ever made big enough to hold it: it
+        jumps to whichever size is larger straight away, and is trimmed to the
+        target once the transition has finished.
+
+        **Windows** — the window IS the bubble, so it has to be resized, one
+        frame at a time, on a thread of its own. Two things make that smooth
+        rather than a slideshow: `SetWindowPos` posted asynchronously (a
+        blocking one costs 30-110ms on a WebView2 window), and frames driven
+        by the clock so a late one catches up instead of stretching the
+        animation.
+        """
+        target = (int(width), int(height))
+        if (self.content_w, self.content_h) == target:
+            if on_done:
+                on_done()
+            return
+        anchor_left = anchor == "bottom-left"
+        self._size_gen += 1
+        gen = self._size_gen
+
+        if sys.platform != "win32" or not self._hwnd:
+            self._animate_in_page(target, ms, gen, anchor_left, on_done)
+            return
+
+        start = (self.content_w, self.content_h)
+        bottom = self.y + self._px(self.h)
+        centre = self.x + self._px(self.w) // 2
+        began = time.monotonic()
+
+        def run():
+            while True:
+                if gen != self._size_gen:
+                    return                   # a newer animation took over
+                t = min(1.0, (time.monotonic() - began) * 1000 / ms)
+                # ease-out: quick off the mark, settling into the final size
+                e = 1 - (1 - t) ** 3
+                w = round(start[0] + (target[0] - start[0]) * e)
+                h = round(start[1] + (target[1] - start[1]) * e)
+                self._set_content_size(w, h)
+                pw, ph = self._px(self.w), self._px(self.h)
+                x = self.x if anchor_left else max(0, centre - pw // 2)
+                self._set_bounds(x, max(0, bottom - ph), pw, ph)
+                if t >= 1.0:
+                    break
+                time.sleep(0.012)
+            self._apply_shape()
+            if on_done:
+                on_done()
+
+        # Its own thread, not the feature's scheduler: the scheduler also runs
+        # poll loops and hotkey work, and a frame that waits behind those is a
+        # frame the eye sees as a step.
+        threading.Thread(target=run, daemon=True).start()
+
+    def _animate_in_page(self, target: tuple[int, int], ms: int, gen: int,
+                         anchor_left: bool, on_done):
+        """The macOS path: CSS moves the bubble, the window just contains it."""
+        hold = (max(self.content_w, target[0]), max(self.content_h, target[1]))
+        self.resize_content(*hold)
+        (self._anchor_bottom_left if anchor_left
+         else self._anchor_bottom_center)()
+        self.call(f"bbSize({target[0]}, {target[1]})")
+
+        def settle():
+            if gen != self._size_gen:
+                return
+            self._set_content_size(*target)
+            self.resize_content(*target)
+            (self._anchor_bottom_left if anchor_left
+             else self._anchor_bottom_center)()
+            if on_done:
+                on_done()
+
+        if self._sched:
+            self._sched.after(ms + 40, settle)
+        else:
+            settle()
+
+    def _set_content_size(self, w: int, h: int):
+        """Book-keeping for a size change that the caller applies itself."""
+        self.content_w, self.content_h = int(w), int(h)
+        self.w = self.content_w + SHADOW_PAD_X
+        self.h = self.content_h + SHADOW_PAD_Y
+
+    def _set_bounds(self, x: int, y: int, pw: int, ph: int):
+        """Move and resize the window in one call, without pywebview.
+
+        `SetWindowPos` does both at once and does not have to be marshalled
+        onto the UI thread, which is what keeps a resize animation smooth.
+        """
+        self.x, self.y = int(x), int(y)
+        self._last_w, self._last_h = self.w, self.h
+        try:
+            import ctypes
+
+            # ASYNCWINDOWPOS is the difference between a smooth animation
+            # and a slideshow: a plain SetWindowPos on a WebView2 window
+            # blocks until the browser has resized itself, measured at 30-110ms
+            # a frame. Posting the request instead costs under a millisecond
+            # and lets the browser catch up on its own thread.
+            SWP_NOZORDER, SWP_NOACTIVATE, SWP_ASYNCWINDOWPOS = 0x0004, 0x0010, 0x4000
+            ctypes.windll.user32.SetWindowPos(
+                self._hwnd, 0, int(x), int(y), int(pw), int(ph),
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
+        except Exception:
+            # Fall back to the slow path rather than leaving the window behind.
+            try:
+                self.window.resize(pw, ph)
+                self.window.move(int(x), int(y))
+            except Exception:
+                pass
+
+    def _anchor_bottom_left(self):
+        """Keep the bubble's bottom-left corner where it already was."""
+        bottom = self.y + self._px(self._last_h if self._last_h else self.h)
+        self._last_w, self._last_h = self.w, self.h
+        self.move(self.x, max(0, bottom - self._px(self.h)))
+
+    def _anchor_bottom_center(self):
+        """Keep the bubble's bottom edge and centre where they already were."""
+        bottom = self.y + self._px(self._last_h if self._last_h else self.h)
+        centre = self.x + self._px(self._last_w if self._last_w else self.w) // 2
+        self._last_w, self._last_h = self.w, self.h
+        self.move(max(0, centre - self._px(self.w) // 2),
+                  max(0, bottom - self._px(self.h)))
 
     def place_near(self, x: int, y: int, below: int = 18):
         """Put the bubble under a point (a text selection, the pointer), kept
@@ -529,7 +1066,10 @@ class Bubble:
         self.w = self.content_w + SHADOW_PAD_X
         self.h = self.content_h + SHADOW_PAD_Y
         try:
-            self.window.resize(self.w, self.h)
+            # In real pixels, like every other size handed to the window —
+            # see `_fit_to_scale`.
+            self.window.resize(self._px(self.w), self._px(self.h))
+            self._apply_shape()          # the corners move with the size
         except Exception:
             pass
 
@@ -545,9 +1085,14 @@ class Bubble:
 
     def rect(self) -> dict:
         """Where the drawn bubble is, for `feature_bus` presence."""
-        return {"x": self.x + (self.w - self.content_w) // 2,
-                "y": self.y + (self.h - self.content_h) // 2,
-                "w": self.content_w, "h": self.content_h}
+        return {"x": self.x + self._px(self.w - self.content_w) // 2,
+                "y": self.y + self._px(self.h - self.content_h) // 2,
+                "w": self._px(self.content_w), "h": self._px(self.content_h),
+                # A hidden bubble holds no place in the stack — a feature that
+                # is on but showing nothing used to push the others up the
+                # screen, leaving one visible bubble floating in mid-air.
+                "visible": self._visible,
+                "compact": self._compact}
 
     # ── talking to the page ──
     def call(self, js: str):
@@ -576,10 +1121,27 @@ class Bubble:
 STAGE_JS = """
 const stage = document.getElementById('stage');
 function enter() {
+  /* Drop the exit state and let the layout settle on it BEFORE restarting the
+     entrance. Removing the class and restarting the keyframes in one frame
+     left the browser interpolating from the exit transform into the entrance
+     transform, so a re-shown bubble jumped instead of rising. */
+  stage.style.transition = 'none';
   stage.classList.remove('leaving');
+  void stage.offsetWidth;
+  stage.style.transition = '';
   stage.style.animation = 'none';
   void stage.offsetWidth;          /* restart the entrance keyframes */
   stage.style.animation = '';
 }
 function leave() { stage.classList.add('leaving'); }
+
+/* Resize the bubble itself, with a transition. Used where the window is
+   transparent and bigger than the bubble (macOS): the shape can grow in CSS,
+   on the compositor, and the window only has to be big enough to contain it.
+   On Windows the window IS the bubble, so it is resized instead. */
+function bbSize(w, h) {
+  stage.style.setProperty('--bw', w + 'px');
+  stage.style.setProperty('--bh', h + 'px');
+}
+
 """

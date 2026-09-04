@@ -32,27 +32,27 @@ Scheduler = wb.Scheduler             # the feature imports it from here
 # The design's compact bar is 460x80. Everything below scales together EXCEPT
 # the two accessibility floors the redesign fixes: the mic circle stays a 48px
 # target and the line of text stays 17px.
-MIC_D = 48                 # minimum touch target; never shrink this
-TEXT_PX = 17               # minimum body copy; never shrink this either
-PAD_V = 8                  # padding above/below the mic circle
-PAD_L = 8
-PAD_R = 18
-GAP = 12                   # mic → waveform → text
-WAVE_BARS, WAVE_BAR_W, WAVE_GAP, WAVE_H = 9, 4, 4, 24
+MIC_D = 34                 # the hold-to-talk target
+TEXT_PX = 14               # the live-state line
+PAD_V = 6                  # padding above/below the mic circle
+PAD_L = 6
+PAD_R = 14
+GAP = 9                    # mic → waveform → text
+WAVE_BARS, WAVE_BAR_W, WAVE_GAP, WAVE_H = 7, 3, 3, 17
 WAVE_W = WAVE_BARS * WAVE_BAR_W + (WAVE_BARS - 1) * WAVE_GAP
-CAP_W, CAP_H = 9, 15       # the mic glyph: capsule + base bar
-BASE_W, BASE_H = 14, 3
+CAP_W, CAP_H = 7, 11       # the mic glyph: capsule + base bar
+BASE_W, BASE_H = 11, 2
 
-BAR_H = MIC_D + PAD_V * 2                       # 64
-BAR_W = 348                                     # the resting pill
+BAR_H = MIC_D + PAD_V * 2                       # 46
+BAR_W = 300                                     # while it has something to say
 
 
 def _max_w() -> int:
-    """How wide the pill may grow for a long line.
+    """How wide the bar may grow for a long line.
 
     A result line like "Okay - search the web for 'youtube.com'" needs about
-    470pt, so a fixed 500 clipped almost every real confirmation. Grow with the
-    display instead, and still leave a margin so the pill never runs to the
+    470pt, so a fixed cap clipped almost every real confirmation. Grow with the
+    display instead, and still leave a margin so the bar never runs to the
     screen edge.
     """
     sw, _ = wb.screen_size()
@@ -61,29 +61,44 @@ def _max_w() -> int:
 
 BAR_MAX_W = _max_w()
 
+# Idle, the bar is just the mic — a coin by the taskbar, sitting beside
+# whatever else is resting down there. It grows into the full bar the moment
+# it is listening or has something to say, the way a dictation pill does.
+IDLE_W = 46
+IDLE_H = 34
+
 BODY = """
 <div class="pill" id="bar">
   <div id="mic"><div class="cap"></div><div class="base"></div></div>
-  <div id="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div id="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
   <div class="label" id="text"></div>
+  <div id="key"></div>
 </div>
 <span id="measure"></span>
 """
 
 CSS = """
 #bar {
-  gap: %(GAP)dpx; width: %(BAR_W)dpx; height: %(BAR_H)dpx;
+  gap: %(GAP)dpx; width: 100%%; height: 100%%;
   padding: %(PAD_V)dpx %(PAD_R)dpx %(PAD_V)dpx %(PAD_L)dpx;
-  transition: width .24s var(--ease), border-color .22s var(--ease);
-  will-change: width;
+  transition: border-color .22s var(--ease);
+  overflow: hidden;
 }
+/* Collapsed: the mic alone, filling the little window. Python animates the
+   window (`Bubble.animate_size`); CSS only says what is inside it. */
+#key { display: none; }
+.small #bar { padding: 0; gap: 0; justify-content: center; }
+.small #wave, .small #text, .small #key { display: none; }
+.small #mic { width: 26px; height: 26px; border-width: 1px; }
+.small #mic .cap  { width: 5px; height: 8px; }
+.small #mic .base { width: 8px; height: 2px; }
 #bar.listening { border-color: rgba(111,155,255,.45); }
 
 /* the mic circle — also the press-and-hold fallback for the ` key */
 #mic {
   flex: none; width: %(MIC_D)dpx; height: %(MIC_D)dpx; border-radius: 50%%;
   display: flex; flex-direction: column; align-items: center;
-  justify-content: center; gap: 3px; cursor: pointer;
+  justify-content: center; gap: 2px; cursor: pointer;
   background: #1c202a; border: 2px solid var(--off);
   transition: background .22s var(--ease), border-color .22s var(--ease),
               transform .18s var(--ease);
@@ -152,22 +167,18 @@ wave.querySelectorAll('i').forEach((el, i) => {
 // that looks like it had room.
 measure.style.font = getComputedStyle(textEl).font;
 
-// How wide the pill wants to be for this line. Python asks first, so it can
-// resize the *window* before the div animates into the new width -- the div is
-// clipped by the window, so growing the div alone just cut the text off.
-function measureWidth(text) {
-  measure.textContent = text;
-  const want = Math.ceil(CHROME + measure.offsetWidth) + 4;
-  return Math.min(MAX_W, Math.max(BASE_W, want));
-}
-
 function setState(state, text, color) {
   bar.classList.toggle('listening', state === 'listening');
   textEl.textContent = text;
   textEl.style.color = color;
-  // the width is an explicit px value so the CSS transition has something to
-  // animate between
-  bar.style.width = measureWidth(text) + 'px';
+}
+
+/* How wide the bar would like to be for this line, in CSS pixels. Python asks
+   for it and resizes the window, because on Windows the window IS the bar —
+   growing it in CSS alone would just clip the text. */
+function wantedWidth(text) {
+  measure.textContent = text;
+  return Math.ceil(Math.min(MAX_W, Math.max(BASE_W, CHROME + measure.offsetWidth + 6)));
 }
 
 // 0..1 mic energy. The floor keeps a quiet room alive rather than flat, and
@@ -213,18 +224,14 @@ class Bar:
     Everything else is safe to call from any thread — see `webbubble.Bubble`.
     """
 
-    # The div's width transition, from bubble.py's CSS (#bar, .24s).
-    _GROW_MS = 240
-
     def __init__(self, events: queue.Queue, sched: "wb.Scheduler | None" = None,
                  on_closed=None):
         self._last: tuple[str, str, str] | None = None
         self._last_level = -1.0
         self._sched = sched
-        self._content_w = BAR_W
-        self._shrink_at: int | None = None
+        self._expanded = False
         self.bubble = wb.Bubble(
-            "Voice Control", BODY, BAR_W, BAR_H,
+            "Voice Control", BODY, IDLE_W, IDLE_H,
             css=CSS % _TOKENS, js=JS % _TOKENS, api=_JsApi(events),
             sched=sched, on_closed=on_closed)
 
@@ -236,50 +243,39 @@ class Bar:
         self.bubble.close()
 
     # ── state in ──
+    def set_hotkey(self, key: str):
+        """The one thing the collapsed oval says: the push-to-talk key."""
+        self.bubble.set_text("key", key)
+
     def set_state(self, state: str, text: str, color: str):
         payload = (state, text, color)
         if payload == self._last:
             return
         self._last = payload
-        self._fit_window(text)
         self.bubble.call(f"setState({json.dumps(state)}, {json.dumps(text)}, "
                          f"{json.dumps(color)})")
+        self._fit(state, text)
 
-    def _fit_window(self, text: str):
-        """Match the window to the width this line is about to need.
+    def _fit(self, state: str, text: str):
+        """Oval while idle, full bar while there is something to show.
 
-        The pill is a div inside a fixed-size window, so a line that grew the
-        div past the window was simply cut off mid-word. Ask the page how wide
-        the line wants to be, then move the window to suit.
-
-        Order matters, because the div animates and the window does not:
-        growing, the window has to be big enough BEFORE the div expands into
-        it; shrinking, the window must stay big until the div has finished
-        pulling in, or the tail of the old text is clipped on the way out.
+        Idle is the resting state the user sees most of the time, so it is the
+        small one — the bar earns its width only while listening, working, or
+        showing what was heard.
         """
-        want = int(self.bubble.measure(
-            f"measureWidth({json.dumps(text)})", default=self._content_w) or
-            self._content_w)
-        want = max(BAR_W, min(BAR_MAX_W, want))
-        if want == self._content_w:
-            return
-        if self._shrink_at is not None and self._sched:
-            self._sched.after_cancel(self._shrink_at)
-            self._shrink_at = None
-        if want > self._content_w:
-            self._apply_width(want)
-        elif self._sched:
-            self._shrink_at = self._sched.after(
-                self._GROW_MS + 40, lambda: self._apply_width(want))
+        want_bar = state != "idle"
+        self.bubble.set_compact(not want_bar)
+        if want_bar:
+            width = self.bubble.measure(f"wantedWidth({json.dumps(text)})", BAR_W)
+            self.bubble.call("document.body.classList.remove('small')")
+            self.bubble.animate_size(int(width), BAR_H)
         else:
-            self._apply_width(want)
-
-    def _apply_width(self, width: int):
-        """Resize the window and keep the pill centred where it was."""
-        self._shrink_at = None
-        self._content_w = width
-        self.bubble.resize_content(width, BAR_H)
-        self.bubble.place_bottom_center()
+            # Unconditional, not "only if it was open": the first idle state
+            # arrives before anything has expanded, and that is the one that
+            # puts the bar into its resting oval.
+            self.bubble.call("document.body.classList.add('small')")
+            self.bubble.animate_size(IDLE_W, IDLE_H)
+        self._expanded = want_bar
 
     def set_level(self, level: float):
         level = max(0.0, min(1.0, level))
@@ -287,6 +283,11 @@ class Bar:
             return
         self._last_level = level
         self.bubble.call(f"setLevel({level:.3f})")
+
+    def place_stacked(self, feature_id: str):
+        """Bottom-centre, above whatever is already down there — rechecked as
+        other bubbles come and go."""
+        self.bubble.keep_stacked(feature_id)
 
     def rect(self) -> dict:
         """Where the pill actually is, for `feature_bus` presence."""

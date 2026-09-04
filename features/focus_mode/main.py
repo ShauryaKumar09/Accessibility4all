@@ -46,10 +46,13 @@ HOSTS_PATH = (Path(r"C:\Windows\System32\drivers\etc\hosts") if plat.IS_WINDOWS
 MARK_BEGIN = "# BEGIN Accessibility4all Focus Mode"
 MARK_END = "# END Accessibility4all Focus Mode"
 
-# Hidden while idle; while a session runs it is the design's confirmation pill,
-# with a red dot and a live countdown. Fixed width so a digit changing once a
-# second never resizes the window under the user.
-BUBBLE_W, BUBBLE_H = 236, 52
+# Hidden while idle. A session opens as a wide bar that says what is blocked
+# and for how long, then folds down to a small circle holding just the
+# countdown — the bar is an announcement, the circle is a status light. Click
+# the circle to get the bar (and the way out of the session) back.
+CARD_W, CARD_H = 300, 44
+DOT_D = 40                 # collapsed: the countdown and nothing else
+AUTO_COLLAPSE_MS = 4000    # how long the bar stays before folding away
 WATCH_MS = 700
 TICK_MS = 1000
 
@@ -57,14 +60,43 @@ BODY = """
 <div class="pill" id="pill">
   <span class="dot" id="dot"></span>
   <span class="label" id="label">Blocking</span>
+  <span class="ring" id="ring"></span>
+  <button class="stop" id="stop">Stop</button>
 </div>
 """
 CSS = """
-#pill { height: 52px; gap: 12px; padding: 0 20px; border-color: var(--accent); }
+#pill { height: 100%; gap: 9px; padding: 0 12px; border-color: var(--accent);
+        overflow: hidden; cursor: pointer; }
 #dot  { background: var(--stop); }
 /* the countdown ticks once a second — the digits must not jump around, so the
-   figures are tabular and the line is centred in a fixed-width pill */
-#label { font-variant-numeric: tabular-nums; }
+   figures are tabular */
+#label { font-variant-numeric: tabular-nums; flex: 1; min-width: 0; }
+#stop {
+  flex: none; height: 26px; padding: 0 12px; border-radius: 999px;
+  border: 1px solid var(--stop); background: transparent; color: var(--stop);
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  font-family: inherit;
+}
+#stop:hover { background: rgba(255,107,107,.12); }
+
+/* Collapsed: everything but the countdown goes, and what is left is centred
+   in the circle. The window is already the right size by the time this class
+   lands — Python animates the window, CSS only decides what is in it. */
+#ring { display: none; font-size: 13px; font-weight: 600; color: var(--stop);
+        font-variant-numeric: tabular-nums; }
+.small #pill { padding: 0; gap: 0; justify-content: center; }
+.small #label, .small #stop, .small #dot { display: none; }
+.small #ring { display: block; }
+"""
+JS = """
+document.getElementById('pill').addEventListener('click', (e) => {
+  if (e.target.id === 'stop') return;      // the button has its own meaning
+  window.pywebview.api.toggle_size();
+});
+document.getElementById('stop').addEventListener('click', (e) => {
+  e.stopPropagation();
+  window.pywebview.api.stop_session();
+});
 """
 
 
@@ -376,6 +408,19 @@ def _run_elevated_worker(payload_path: str):
     sys.exit(0)
 
 
+class _BubbleApi:
+    """What the bubble's page can call: click to fold, or stop the session."""
+
+    def __init__(self, app):
+        self._app = app
+
+    def toggle_size(self):
+        self._app.toggle_size()
+
+    def stop_session(self):
+        self._app.stop_session()
+
+
 class FocusModeApp:
     """The bubble: hidden while idle, a pill with a live countdown while blocking."""
 
@@ -386,8 +431,11 @@ class FocusModeApp:
         self._end_time = 0.0
         self._tick_id: int | None = None
         self._sched = wb.Scheduler(on_error=lambda e: log(f"timer failed: {e}"))
-        self.bubble = wb.Bubble("Focus Mode", BODY, BUBBLE_W, BUBBLE_H,
-                                css=CSS, hidden=True, sched=self._sched,
+        self._expanded = True
+        self._collapse_id: int | None = None
+        self.bubble = wb.Bubble("Focus Mode", BODY, CARD_W, CARD_H,
+                                css=CSS, js=JS, api=_BubbleApi(self),
+                                hidden=True, sched=self._sched,
                                 on_closed=self._sched.stop)
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
@@ -453,8 +501,11 @@ class FocusModeApp:
         self.settings["end_time"] = end_time
         save_settings(self.settings)
         log(f"blocking {len(domains)} site(s) until {time.ctime(end_time)}")
-        self.bubble.place_stacked(FEATURE_ID)
+        # Bottom-left, out of the pile the other bubbles share: this one is a
+        # status light that sits there for the whole session.
+        self.bubble.place_bottom_left()
         feature_bus.update_presence(FEATURE_ID, os.getpid(), self.bubble.rect())
+        self._expand(announce=True)
         self.bubble.show()
         self._tick()
 
@@ -482,8 +533,49 @@ class FocusModeApp:
             self._end_session("timer elapsed")
             return
         mins, secs = divmod(int(remaining), 60)
-        self.bubble.set_text("label", f"Blocking — {mins}m {secs}s")
+        sites = len(self.settings.get("blocklist", []))
+        self.bubble.set_text(
+            "label", f"Blocking {sites} site{'' if sites == 1 else 's'} "
+                     f"— {mins}:{secs:02d}")
+        # The circle has room for one number, so it counts down in minutes
+        # until the last one, then in seconds.
+        self.bubble.set_text("ring", f"{mins}m" if mins else f"{secs}s")
+        feature_bus.update_presence(FEATURE_ID, os.getpid(), self.bubble.rect())
         self._tick_id = self._sched.after(TICK_MS, self._tick)
+
+    # ── the bar and the circle ──
+    def _expand(self, announce: bool = False):
+        """Show the full bar. `announce` folds it away again on its own."""
+        self._cancel_collapse()
+        self._expanded = True
+        self.bubble.call("document.body.classList.remove('small')")
+        self.bubble.animate_size(CARD_W, CARD_H, anchor="bottom-left")
+        if announce:
+            self._collapse_id = self._sched.after(AUTO_COLLAPSE_MS, self._collapse)
+
+    def _collapse(self):
+        """Fold down to the countdown circle."""
+        self._cancel_collapse()
+        self._expanded = False
+        self.bubble.call("document.body.classList.add('small')")
+        self.bubble.animate_size(DOT_D, DOT_D, anchor="bottom-left")
+
+    def _cancel_collapse(self):
+        if self._collapse_id:
+            self._sched.after_cancel(self._collapse_id)
+            self._collapse_id = None
+
+    def toggle_size(self):
+        """What clicking the bubble does — called from the page."""
+        if self._expanded:
+            self._collapse()
+        else:
+            self._expand()
+
+    def stop_session(self):
+        """The bar's one action: end the session and unblock everything."""
+        if self._active:
+            self._end_session("stopped from the bubble")
 
     # ── settings (edited in the hub) ──
     def _watch_settings(self):

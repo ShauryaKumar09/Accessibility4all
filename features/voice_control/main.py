@@ -1480,10 +1480,15 @@ class App:
         hint = plat.permission_hints("voice_control")
         if hint:
             log("STARTUP", hint)
+        self.bar.set_hotkey("`")      # push-to-talk is the backtick key
         self._set_state("idle")
         self._drain_ui()
         self._start_key_listener()
-        self._update_presence()
+        # Sit above any bubble that is already in the bottom-centre slot —
+        # the hub starts features together, so whichever one gets there first
+        # is a race, and without this the bar landed on top of Page Reader.
+        self.bar.place_stacked("voice_control")
+        self._presence_loop()
         self.after(SETTINGS_WATCH_MS, self._watch_settings)
         if self._always_on:
             self.after(200, self._start_always_on)
@@ -1510,6 +1515,12 @@ class App:
 
     def _update_presence(self):
         feature_bus.update_presence("voice_control", os.getpid(), self.bar.rect())
+
+    def _presence_loop(self):
+        """The bar changes shape as it listens, and the other bubbles lay
+        themselves out around whatever it last claimed — so keep it current."""
+        self._update_presence()
+        self.after(1000, self._presence_loop)
 
     # ── settings (edited in the hub) ──
     def _watch_settings(self):

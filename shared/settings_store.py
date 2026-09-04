@@ -37,6 +37,11 @@ DEFAULTS: dict[str, dict] = {
         # Replaces the old free-form spinbox: three named sizes.
         "text_size": "medium",          # small 18 / medium 22 / large 28
         "show_raw_on_parse_error": True,
+        # Reads the tone + answer aloud as soon as the card shows, for anyone
+        # who finds a written explanation of subtext just as hard to parse as
+        # the original text. Shares page_reader's neural voice.
+        "read_aloud": False,
+        "tts_voice": "en-US-AvaMultilingualNeural",
     },
     "dyslexia_font": {
         "website_enabled": True,
