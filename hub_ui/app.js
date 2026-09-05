@@ -167,8 +167,7 @@ async function renderFeaturePage(main, feat) {
   const panelHost = document.getElementById("settings-panel-host");
   if (feat.settingsPanel) {
     const panelData = await api().get_panel_data(feat.id);
-    if (feat.settingsPanel === "dyslexia") renderDyslexiaPanel(panelHost, feat, settings, panelData, on);
-    else if (feat.settingsPanel === "colorblind") renderColorblindPanel(panelHost, feat, settings, panelData);
+    if (feat.settingsPanel === "colorblind") renderColorblindPanel(panelHost, feat, settings, panelData);
     else if (feat.settingsPanel === "focus") renderFocusPanel(panelHost, feat, settings, panelData);
     else if (feat.settingsPanel === "cursor") renderCursorPanel(panelHost, feat, settings, panelData);
   }
@@ -245,59 +244,6 @@ function renderSteps(feat) {
 }
 
 /* ── bespoke settings panels ─────────────────────────────────────────── */
-function renderDyslexiaPanel(host, feat, settings, panelData, on) {
-  const spacing = settings.letter_spacing ?? 0.03;
-  const lineHeight = settings.line_height ?? 1.55;
-  host.innerHTML = `
-    <div class="settings-panel">
-      <h4>Pick a font</h4>
-      <div class="font-grid" id="font-grid"></div>
-      <div id="stepper-spacing"></div>
-      <div id="stepper-line"></div>
-      <div class="small-note">
-        ${on
-          ? "Applied automatically — Windows apps and websites (via the Chrome extension) update as soon as you pick a font."
-          : "Turn the switch in the sidebar on to apply this font."}
-      </div>
-    </div>
-    <div class="screen-btn">
-      <button class="text-btn" id="open-extension">Set up the Chrome extension</button>
-      <button class="text-btn primary" id="start-screening">Take the screening test</button>
-    </div>
-  `;
-  document.getElementById("open-extension").addEventListener("click", async () => {
-    await api().open_chrome_extension_setup();
-  });
-  const grid = document.getElementById("font-grid");
-  for (const f of panelData.fontChoices || []) {
-    const card = document.createElement("div");
-    card.className = "font-card" + (settings.font_family === f.name ? " selected" : "");
-    const missing = f.installed === false;
-    if (missing) card.className += " unavailable";
-    const note = missing ? "Not installed on this PC" : f.note;
-    card.innerHTML = `<div class="fname">${escapeHtml(f.name)}</div><div class="fnote">${escapeHtml(note)}</div>`;
-    card.addEventListener("click", async () => {
-      // Selecting a font that isn't installed used to fail silently, which
-      // looked like the whole feature was broken.
-      if (missing) return;
-      settings.font_family = f.name;
-      await api().save_setting(feat.id, "font_family", f.name);
-      renderDyslexiaPanel(host, feat, settings, panelData, on);
-    });
-    grid.appendChild(card);
-  }
-
-  renderStepper(document.getElementById("stepper-spacing"), "Space between letters",
-    spacing, 0.0, 0.12, 0.01, v => `${v.toFixed(2)} em`,
-    async v => { settings.letter_spacing = v; await api().save_setting(feat.id, "letter_spacing", v); });
-
-  renderStepper(document.getElementById("stepper-line"), "Space between lines",
-    lineHeight, 1.0, 2.2, 0.05, v => `${v.toFixed(2)}×`,
-    async v => { settings.line_height = v; await api().save_setting(feat.id, "line_height", v); });
-
-  document.getElementById("start-screening").addEventListener("click", openScreeningModal);
-}
-
 function renderColorblindPanel(host, feat, settings, panelData) {
   host.innerHTML = `<div class="settings-panel"><h4>Filter type</h4><div class="filter-grid" id="filter-grid"></div></div>`;
   const grid = document.getElementById("filter-grid");
@@ -407,87 +353,11 @@ function openHotkeyModal(feat, shortcut, settings) {
   });
 }
 
-/* ── screening quiz (pure client-side, same modal) ──────────────────── */
-let SCREENING = null;
-let quizState = null;
-
-async function openScreeningModal() {
-  if (!SCREENING) SCREENING = await api().get_screening();
-  quizState = { order: shuffle([...SCREENING.questions.keys()]), idx: 0, flags: 0, readStart: 0 };
-  showScreeningIntro();
-}
-
-function showScreeningIntro() {
-  openModal(`
-    <h3>Dyslexia Screening</h3>
-    <p>${SCREENING.questions.length} quick questions, then a short timed reading task.</p>
-    <div class="modal-actions"><button class="text-btn primary" id="q-start">Start</button></div>
-  `);
-  document.getElementById("q-start").addEventListener("click", showScreeningQuestion);
-}
-
-function showScreeningQuestion() {
-  if (quizState.idx >= quizState.order.length) { showReadingTask(); return; }
-  const q = SCREENING.questions[quizState.order[quizState.idx]];
-  const opts = shuffle(q.options.map((text, i) => ({ text, i })));
-  const optsHtml = opts.map(o => `<button class="quiz-opt" data-i="${o.i}">${escapeHtml(o.text)}</button>`).join("");
-  openModal(`
-    <h3>Question ${quizState.idx + 1} of ${quizState.order.length}</h3>
-    <p>${escapeHtml(q.prompt)}</p>
-    <div class="quiz-card">${optsHtml}</div>
-  `);
-  document.querySelectorAll(".quiz-opt").forEach(btn => {
-    btn.addEventListener("click", () => {
-      if (parseInt(btn.dataset.i) !== q.correct) quizState.flags++;
-      quizState.idx++;
-      showScreeningQuestion();
-    });
-  });
-}
-
-function showReadingTask() {
-  openModal(`
-    <h3>Reading speed</h3>
-    <p>Read the passage, then press Done.</p>
-    <div class="quiz-card">${escapeHtml(SCREENING.passage)}</div>
-    <div class="modal-actions"><button class="text-btn primary" id="q-done">Done reading</button></div>
-  `);
-  quizState.readStart = performance.now();
-  document.getElementById("q-done").addEventListener("click", () => {
-    const elapsed = Math.max(0.5, (performance.now() - quizState.readStart) / 1000);
-    const words = SCREENING.passage.split(/\s+/).length;
-    const wpm = words / (elapsed / 60);
-    if (wpm < SCREENING.typicalWpm * 0.5) quizState.flags++;
-    showScreeningResult(wpm);
-  });
-}
-
-function showScreeningResult(wpm) {
-  let msg, color;
-  if (quizState.flags <= 1) { msg = "Few patterns showed up in your answers."; color = "var(--on)"; }
-  else if (quizState.flags <= 3) { msg = "Some patterns showed up in your answers."; color = "var(--warm-text)"; }
-  else { msg = "Several patterns showed up in your answers."; color = "var(--stop-border)"; }
-  openModal(`
-    <h3>Result</h3>
-    <p style="color:${color};font-weight:600">${msg} (reading speed: ${Math.round(wpm)} words/min)</p>
-    <div class="modal-actions"><button class="text-btn" id="q-again">Try again</button></div>
-  `);
-  document.getElementById("q-again").addEventListener("click", openScreeningModal);
-}
-
 /* ── utils ───────────────────────────────────────────────────────────── */
 function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s == null ? "" : String(s);
   return d.innerHTML;
-}
-function shuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
 }
 
 if (window.pywebview) boot();

@@ -115,7 +115,7 @@ STACK_GAP = 12           # between two bubbles that are up at the same time
 # (tone_reader is absent on purpose: its card appears next to your selection,
 # not in the bottom-centre pile.)
 STACK_ORDER = ["voice_control", "page_reader", "focus_mode",
-               "dyslexia_font", "colorblind_filter"]
+               "colorblind_filter"]
 
 # Shared timing. One easing curve and one duration family keeps every bubble
 # moving the same way.

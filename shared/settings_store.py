@@ -43,15 +43,6 @@ DEFAULTS: dict[str, dict] = {
         "read_aloud": False,
         "tts_voice": "en-US-AvaMultilingualNeural",
     },
-    "dyslexia_font": {
-        "website_enabled": True,
-        "font_family": "OpenDyslexic",
-        "letter_spacing": 0.03,
-        "line_height": 1.55,
-        "font_weight": "inherit",
-        "windows_targets": ["Arial", "Calibri", "Segoe UI", "Tahoma",
-                            "Times New Roman", "Verdana"],
-    },
     "colorblind_filter": {
         "enabled": False,
         "filter_name": "Deuteranopia",
@@ -107,8 +98,8 @@ class Watcher:
     Compares the file's *contents*, not just its timestamp. Every feature
     saves its own settings once during startup, which is a write the watcher
     would otherwise report back as a change the hub had made: page_reader and
-    tone_reader rebound their hotkeys a second later, and cursor_size and
-    dyslexia_font re-showed their bubble, all from their own no-op save. A
+    tone_reader rebound their hotkeys a second later, and cursor_size
+    re-showed its bubble, all from their own no-op save. A
     rewrite that leaves the bytes identical is not a change.
     """
 

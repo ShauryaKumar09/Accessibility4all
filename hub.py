@@ -43,7 +43,6 @@ from shared import hotkeys as hk
 from shared import platform as plat
 from shared import pynput_darwin
 from shared import settings_store as store
-from shared import windows_fonts as winfonts
 
 configure_stdio()
 pynput_darwin.install()
@@ -55,7 +54,7 @@ UI_DIR = ROOT / "hub_ui"
 STATE_FILE = ROOT / "hub_state.json"     # toggles + text scale
 STDERR_KEEP_LINES = 25                   # tail kept per feature, to explain a crash
 
-FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader", "dyslexia_font",
+FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader",
                  "colorblind_filter", "focus_mode", "cursor_size"]
 
 # One entry per feature: display copy, settings-sheet options/shortcuts (with
@@ -137,28 +136,6 @@ FEATURE_DATA = {
              "Press Got it, Escape, or click elsewhere."],
         ],
     },
-    "dyslexia_font": {
-        "name": "Dyslexia",
-        "description": "Easier fonts for websites, plus a quick reading screen.",
-        "options": [
-            {"key": "website_enabled", "label": "Website font",
-             "info": "Applies your chosen font to pages you visit, via the "
-                     "bundled Chrome extension."},
-        ],
-        "shortcuts": [],
-        "settings_panel": "dyslexia",
-        "instructions": [
-            ["Pick a font", "The preview updates live so you can compare."],
-            ["Adjust spacing", "Use +/- to space out letters and lines."],
-            ["Browse normally",
-             "Install the Chrome extension to carry your font to every page."],
-            ["Restart open apps",
-             "Windows apps pick the new font up when they start. Ones already "
-             "open keep the old one until you reopen them."],
-            ["Take the screening test",
-             "A short, non-diagnostic check further down this page."],
-        ],
-    },
     "colorblind_filter": {
         "name": "Color Blind Filter",
         "description": "Makes colors on your screen easier to tell apart.",
@@ -204,32 +181,6 @@ FILTER_TYPES = {
     "Deuteranopia": 3, "Protanopia": 4, "Tritanopia": 5,
     "Grayscale": 0, "Invert": 1, "Grayscale Inverted": 2,
 }
-
-# NOT a diagnostic tool. It cannot identify dyslexia. It only notices a few
-# patterns sometimes associated with reading differences.
-SCREENING_DISCLAIMER = (
-    "Not a diagnosis — it can't identify dyslexia, only a few related patterns. "
-    "If reading is a concern, talk to a specialist such as an educational psychologist."
-)
-SCREENING_QUESTIONS = [
-    {"prompt": "Which one matches the target letter? Target: b",
-     "options": ["d", "b", "p", "q"], "correct": 1},
-    {"prompt": "Which one matches the target letter? Target: p",
-     "options": ["q", "d", "p", "b"], "correct": 2},
-    {"prompt": "Which word is spelled the same forwards and as shown? Target: was",
-     "options": ["saw", "was", "sae", "aws"], "correct": 1},
-    {"prompt": "Which word does NOT rhyme with the others?",
-     "options": ["cat", "hat", "dog", "bat"], "correct": 2},
-    {"prompt": "Which word does NOT rhyme with the others?",
-     "options": ["light", "night", "sight", "bench"], "correct": 3},
-    {"prompt": "Put in order: which comes first alphabetically?",
-     "options": ["dog", "cat", "ant", "elk"], "correct": 2},
-]
-SCREENING_PASSAGE = (
-    "The quick brown fox jumps over the lazy dog. Reading every day helps "
-    "build stronger word recognition and comprehension over time."
-)
-SCREENING_TYPICAL_WPM = 200  # rough, non-clinical adult reference
 
 
 def _load_feature_module(feature_id: str):
@@ -371,15 +322,6 @@ class Api:
 
     def get_panel_data(self, feature_id: str) -> dict:
         """Extra data a bespoke settings panel needs beyond options/shortcuts."""
-        if feature_id == "dyslexia_font":
-            # Whether each font is actually on this machine: picking one that
-            # isn't installed used to fail with nothing visible happening,
-            # which read as "the whole feature is broken".
-            return {
-                "fontChoices": [{"name": n, "note": winfonts.FONT_NOTES.get(n, ""),
-                                 "installed": winfonts.is_font_installed(n)}
-                                for n in winfonts.FONT_CHOICES],
-            }
         if feature_id == "colorblind_filter":
             return {"filterTypes": list(FILTER_TYPES)}
         if feature_id == "focus_mode":
@@ -391,14 +333,6 @@ class Api:
         if feature_id == "cursor_size":
             return {"isWindows": plat.IS_WINDOWS}
         return {}
-
-    def get_screening(self) -> dict:
-        return {
-            "disclaimer": SCREENING_DISCLAIMER,
-            "questions": SCREENING_QUESTIONS,
-            "passage": SCREENING_PASSAGE,
-            "typicalWpm": SCREENING_TYPICAL_WPM,
-        }
 
     # ── settings (shared/settings_store.py — the running feature watches this) ──
     def get_settings(self, feature_id: str) -> dict:
@@ -414,10 +348,6 @@ class Api:
             # filter changed nothing on screen.
             if key == "enabled" or self._is_running(feature_id):
                 self._apply_colorblind_filter(settings)
-        elif feature_id == "dyslexia_font" and key == "font_family" and self._is_running(feature_id):
-            # Feature's already on — reapply immediately with the new font
-            # instead of waiting for the next toggle.
-            self._apply_dyslexia_toggle(True)
         elif feature_id == "cursor_size" and key == "size" and self._is_running(feature_id):
             self._apply_cursor_size(int(value))
         return settings
@@ -447,23 +377,6 @@ class Api:
 
     def pretty_hotkey(self, spec: str) -> str:
         return hk.pretty(spec)
-
-    # ── dyslexia Chrome extension ──
-    def open_chrome_extension_setup(self) -> dict:
-        """Open both halves of the one step Chrome will not let us automate.
-
-        Loading an unpacked extension needs a human to click through
-        chrome://extensions, so the least we can do is put the folder and
-        that page in front of them instead of describing where to look.
-        """
-        try:
-            winfonts.open_extension_folder()
-            winfonts.open_chrome_extensions()
-            return {"ok": True}
-        except Exception as e:
-            safe_print(f"[hub] could not open extension setup: {e}", flush=True)
-            self._notice = f"Dyslexia: {e}"
-            return {"ok": False, "error": str(e)}
 
     # ── start at login ──
     def get_launch_at_startup(self) -> dict:
@@ -552,70 +465,9 @@ class Api:
             self._apply_colorblind_filter(settings)
         elif feature_id == "focus_mode":
             self._apply_focus_toggle(turning_on)
-        elif feature_id == "dyslexia_font":
-            self._apply_dyslexia_toggle(turning_on)
         elif feature_id == "cursor_size":
             settings = store.load(feature_id)
             self._apply_cursor_size(int(settings.get("size", 1)) if turning_on else 1)
-
-    def _apply_dyslexia_toggle(self, turning_on: bool):
-        """Windows app-font substitution now follows the sidebar switch
-        automatically — no separate "Use this font in Windows apps" button.
-        (`website_enabled` stays its own toggle: it controls the Chrome
-        extension, a genuinely different mechanism the user may want
-        independent of whether Windows apps are substituted.)"""
-        font_name = None
-        targets = list(winfonts.SUBSTITUTION_TARGETS)
-        if turning_on:
-            settings = store.load("dyslexia_font")
-            font_name = settings.get("font_family") or winfonts.FONT_CHOICES[0]
-            if plat.IS_WINDOWS and not winfonts.is_font_installed(font_name):
-                # We ship OpenDyslexic, so install it on demand rather than
-                # making the user go and find a font before the feature that
-                # exists to provide one will do anything.
-                winfonts.install_bundled_font(font_name)
-            if plat.IS_WINDOWS and not winfonts.is_font_installed(font_name):
-                # Not one of ours and not on this PC. Falling back beats
-                # failing with nothing visible happening, which is how this
-                # read as "not working".
-                fallback = next((f for f in winfonts.FONT_CHOICES
-                                 if winfonts.is_font_installed(f)), None)
-                if fallback is None:
-                    self._notice = (f"Dyslexia: {font_name} isn't installed, and no "
-                                    f"other supported font is either.")
-                    console.log_event("hub", "apply_result", feature="dyslexia_font",
-                                      ok=False, error="no installed font available")
-                    return
-                self._notice = (f"Dyslexia: {font_name} isn't installed on this PC — "
-                                f"using {fallback}.")
-                font_name = fallback
-                settings["font_family"] = fallback
-                store.save("dyslexia_font", settings)
-        console.log_event("hub", "apply_start", feature="dyslexia_font",
-                          turning_on=turning_on, font_name=font_name,
-                          target_count=len(targets))
-        try:
-            if turning_on:
-                winfonts.apply_windows_substitution(font_name, targets)
-            else:
-                if winfonts.BACKUP_FILE.exists():
-                    winfonts.restore_windows_substitution()
-            verified_value = None
-            if targets:
-                try:
-                    import winreg
-                    verified_value = winfonts._read_registry_string(
-                        winreg.HKEY_CURRENT_USER, winfonts.FONT_SUBSTITUTES_PATH, targets[0])
-                except Exception:
-                    verified_value = None
-            console.log_event("hub", "apply_result", feature="dyslexia_font",
-                              ok=True, sample_target=targets[0] if targets else None,
-                              verified_value=verified_value)
-        except Exception as e:
-            safe_print(f"[hub] dyslexia font toggle failed: {e}", flush=True)
-            self._notice = f"Dyslexia Font: {e}"
-            console.log_event("hub", "apply_result", feature="dyslexia_font",
-                              ok=False, error=str(e))
 
     def _apply_cursor_size(self, size: int):
         """Resize the pointer now, not just in the registry.
@@ -762,30 +614,13 @@ class Api:
         for feat in self._features:
             if feat.id in self._enabled and feat.id in known:
                 # Re-apply the actual effect too, not just relaunch the
-                # bubble — colorblind_filter/dyslexia_font's Windows-level
-                # state doesn't survive a hub restart on its own now that
-                # applying it lives here rather than in the subprocess.
+                # bubble — colorblind_filter's Windows-level state doesn't
+                # survive a hub restart on its own now that applying it lives
+                # here rather than in the subprocess.
                 self._apply_single_toggle(feat.id, True)
                 self._start(feat)
         self._enabled &= known
         save_state(self._enabled, self.text_scale, self.launch_at_startup)
-        self._cleanup_stale_dyslexia_font()
-
-    def _cleanup_stale_dyslexia_font(self):
-        """If a previous session applied Windows font substitution and never
-        restored it (crash, force-kill) and dyslexia_font isn't enabled this
-        session, restore now — mirrors focus_mode's own stale-block cleanup,
-        done here since applying/restoring the font now lives in the hub,
-        not the feature's own subprocess."""
-        if "dyslexia_font" in self._enabled:
-            return
-        try:
-            if winfonts.BACKUP_FILE.exists():
-                winfonts.restore_windows_substitution()
-                safe_print("[hub] restored Windows font substitution left "
-                          "over from a previous session", flush=True)
-        except Exception as e:
-            safe_print(f"[hub] stale dyslexia-font cleanup failed: {e}", flush=True)
 
     def poll(self) -> dict:
         """Called by JS on a timer — detects a crashed subprocess and reflects it."""

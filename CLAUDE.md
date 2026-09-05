@@ -67,7 +67,6 @@ shared/
 ├── webbubble.py        ← the floating bubble kit every feature's window uses
 ├── settings_store.py   ← per-feature settings.json + a change Watcher
 ├── hotkeys.py          ← hotkey strings, and capture from a tkinter key event
-├── windows_fonts.py    ← Windows font substitution (hub + dyslexia_font)
 ├── feature_bus.py      ← file-based IPC (commands, presence)
 ├── screen_ocr.py       ├── platform.py  ├── groq_vision.py  ├── console.py
 features/
@@ -117,8 +116,8 @@ desktop only gets a bubble".
   separate hit targets). Each feature page has a title row (name, hotkey
   chips, on/off switches, each with an info-circle that opens a dimmed
   popup — never a second OS window), a bespoke settings panel for anything
-  that isn't a boolean (Dyslexia's font picker/steppers, Color Blind's
-  filter-type buttons, Focus Mode's block-list/duration), and a two-column
+  that isn't a boolean (Color Blind's filter-type buttons, Focus Mode's
+  block-list/duration), and a two-column
   body: numbered clickable instructions on the left, a placeholder panel on
   the right reserved for a future preview. `hub_ui/style.css`'s CSS custom
   properties mirror `shared/ui_kit.py`'s `C` dict 1:1 so the hub and the
@@ -142,7 +141,7 @@ desktop only gets a bubble".
   revisited.
 - **Bubbles rest small and expand when they are doing something** — a feature
   that is on but idle is a coin by the taskbar (Voice Control's mic, Page
-  Reader's play glyph, a one-glyph status light for Colour Blind / Dyslexia /
+  Reader's play glyph, a one-glyph status light for Colour Blind /
   Cursor Size). It grows into a full bar or pill while it is listening,
   reading or announcing a change, then folds back. `Bubble.animate_size`
   drives the change and `Bubble.set_compact` tells the layout which shape a

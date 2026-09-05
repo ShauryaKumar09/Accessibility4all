@@ -184,50 +184,6 @@ def _cursor_state():
     return size, base
 
 
-# ── dyslexia font ──
-def test_dyslexia_font():
-    print("\ndyslexia font")
-    if not plat.IS_WINDOWS:
-        record("dyslexia font", SKIP, "Windows-only")
-        return
-    import hub
-
-    from shared import windows_fonts as winfonts
-
-    api = hub.Api()
-    if winfonts.BACKUP_FILE.exists():
-        record("dyslexia font", SKIP, "a substitution is already applied")
-        return
-    try:
-        api._apply_dyslexia_toggle(True)
-        check("backup written", winfonts.BACKUP_FILE.exists(), True,
-              "so the original fonts can be restored")
-        check("a font was actually substituted",
-              _font_substitute("Segoe UI") not in (None, "Segoe UI"), True)
-
-        api._apply_dyslexia_toggle(False)
-        check("restored", winfonts.BACKUP_FILE.exists(), False,
-              "backup removed, so 'applied' stays a truthful signal")
-    except Exception as e:
-        record("dyslexia font", FAIL, str(e))
-        try:
-            api._apply_dyslexia_toggle(False)
-        except Exception:
-            pass
-
-
-def _font_substitute(name: str):
-    import winreg
-    try:
-        with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes",
-                0, winreg.KEY_READ) as k:
-            return winreg.QueryValueEx(k, name)[0]
-    except OSError:
-        return None
-
-
 # ── focus mode ──
 def test_focus_mode(allow_elevation: bool):
     print("\nfocus mode")
@@ -325,7 +281,6 @@ def test_placement():
 GROUPS = {
     "colorblind": test_colorblind,
     "cursor": test_cursor_size,
-    "dyslexia": test_dyslexia_font,
     "focus": None,            # needs the elevation flag, wired below
     "autostart": test_autostart,
     "placement": test_placement,

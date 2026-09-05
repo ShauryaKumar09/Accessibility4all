@@ -301,26 +301,6 @@ body {
   font-weight: 600;
 }
 
-.font-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-bottom: 18px;
-}
-.font-card {
-  background: var(--inset);
-  border: 2px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  min-height: 70px;
-  cursor: pointer;
-}
-.font-card.selected { background: var(--accent-fill); border-color: var(--accent); }
-.font-card .fname { font-size: 17px; font-weight: 600; }
-.font-card .fnote { font-size: 13px; color: var(--fg-second); margin-top: 2px; }
-.font-card.unavailable { opacity: .45; cursor: not-allowed; }
-.font-card.unavailable:hover { border-color: var(--border); background: var(--card); }
-
 .stepper-row {
   display: flex;
   align-items: center;
@@ -448,19 +428,7 @@ body {
   font-size: 14px;
 }
 
-/* screening test */
-.screen-btn { margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; }
-.quiz-card { background: var(--inset); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 16px; margin: 14px 0; }
-.quiz-opt {
-  display: block; width: 100%; text-align: left;
-  padding: 12px 14px; margin-top: 8px;
-  background: var(--card); border: 1px solid var(--border-ctrl);
-  border-radius: var(--radius-sm); color: var(--fg); font-size: 15px; cursor: pointer;
-}
-.quiz-opt:hover { border-color: var(--accent); }
-
-/* ── modal (info popups, hotkey capture, screening) ─────────────────── */
+/* ── modal (info popups, hotkey capture) ────────────────────────────── */
 .modal-scrim {
   position: fixed; inset: 0;
   background: var(--scrim);
