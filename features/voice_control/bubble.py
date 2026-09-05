@@ -44,19 +44,21 @@ CAP_W, CAP_H = 7, 11       # the mic glyph: capsule + base bar
 BASE_W, BASE_H = 11, 2
 
 BAR_H = MIC_D + PAD_V * 2                       # 46
-BAR_W = 300                                     # while it has something to say
+BAR_W = 300
+MAX_LINES = 2                                   # a long line wraps, not widens
+LINE_H = 17                                     # must match #text line-height
 
 
 def _max_w() -> int:
     """How wide the bar may grow for a long line.
 
-    A result line like "Okay - search the web for 'youtube.com'" needs about
-    470pt, so a fixed cap clipped almost every real confirmation. Grow with the
-    display instead, and still leave a margin so the bar never runs to the
-    screen edge.
+    A bar that grows to fit any confirmation on ONE line reached ~760px and
+    read as a banner stretched across the desktop rather than a pill floating
+    beside the work. So the width is capped tight and a long line wraps to a
+    second row instead (`MAX_LINES`) — the bar gets taller, not wider.
     """
     sw, _ = wb.screen_size()
-    return max(BAR_W, min(760, sw - 160))
+    return max(BAR_W, min(420, sw - 160))
 
 
 BAR_MAX_W = _max_w()
@@ -138,7 +140,14 @@ CSS = """
   50%%       { transform: scaleY(1); }
 }
 
-#text { flex: 1; min-width: 0; font-size: %(TEXT_PX)dpx; }
+#text {
+  flex: 1; min-width: 0; font-size: %(TEXT_PX)dpx; line-height: %(LINE_H)dpx;
+  /* Wrap to at most two rows rather than stretching the bar across the
+     desktop; anything longer than that ellipsises. */
+  display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: %(MAX_LINES)d; overflow: hidden;
+  overflow-wrap: anywhere;
+}
 #measure {
   position: absolute; visibility: hidden; white-space: nowrap;
   font-size: %(TEXT_PX)dpx; left: -9999px; top: -9999px;
@@ -154,6 +163,7 @@ const measure = document.getElementById('measure');
 // the fixed part of the pill: paddings + mic + gaps + waveform + border
 const CHROME = %(CHROME)d;
 const BASE_W = %(BAR_W)d, MAX_W = %(BAR_MAX_W)d;
+const BAR_H = %(BAR_H)d, LINE_H = %(LINE_H)d, MAX_LINES = %(MAX_LINES)d;
 
 // Each bar gets its own period and start offset, so the waveform reads as
 // speech rather than as one bar mirrored nine times (design: fw-bar).
@@ -181,6 +191,16 @@ function wantedWidth(text) {
   return Math.ceil(Math.min(MAX_W, Math.max(BASE_W, CHROME + measure.offsetWidth + 6)));
 }
 
+/* [width, height] for this line. Once the text is wider than the cap it wraps,
+   so the bar answers with extra rows of height instead of more width. */
+function wantedBox(text) {
+  const w = wantedWidth(text);
+  measure.textContent = text;
+  const avail = w - CHROME;
+  const lines = Math.min(MAX_LINES, Math.max(1, Math.ceil(measure.offsetWidth / Math.max(1, avail))));
+  return [w, BAR_H + (lines - 1) * LINE_H];
+}
+
 // 0..1 mic energy. The floor keeps a quiet room alive rather than flat, and
 // full-scale speech reaches the design's full-height bars.
 function setLevel(level) {
@@ -201,6 +221,7 @@ _TOKENS = dict(
     PAD_L=PAD_L, PAD_R=PAD_R, GAP=GAP, TEXT_PX=TEXT_PX, WAVE_GAP=WAVE_GAP,
     WAVE_BAR_W=WAVE_BAR_W, WAVE_H=WAVE_H, CAP_W=CAP_W, CAP_H=CAP_H,
     BASE_W=BASE_W, BASE_H=BASE_H, WAVE=C["WAVE"],
+    MAX_LINES=MAX_LINES, LINE_H=LINE_H,
     CHROME=PAD_L + MIC_D + GAP + WAVE_W + GAP + PAD_R + 2,  # +2: the pill's border
 )
 
@@ -266,9 +287,13 @@ class Bar:
         want_bar = state != "idle"
         self.bubble.set_compact(not want_bar)
         if want_bar:
-            width = self.bubble.measure(f"wantedWidth({json.dumps(text)})", BAR_W)
+            box = self.bubble.measure(f"wantedBox({json.dumps(text)})", None)
+            if isinstance(box, (list, tuple)) and len(box) == 2:
+                width, height = int(box[0]), int(box[1])
+            else:
+                width, height = BAR_W, BAR_H
             self.bubble.call("document.body.classList.remove('small')")
-            self.bubble.animate_size(int(width), BAR_H)
+            self.bubble.animate_size(width, height)
         else:
             # Unconditional, not "only if it was open": the first idle state
             # arrives before anything has expanded, and that is the one that

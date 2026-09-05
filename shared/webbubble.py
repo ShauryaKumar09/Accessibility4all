@@ -481,6 +481,7 @@ class Bubble:
         # share one row along the bottom; expanded ones get a row each.
         self._compact = True
         self._size_gen = 0
+        self._animating = False
         self._last_w, self._last_h = self.w, self.h
         self.window = webview.create_window(
             title, html=page(body, css, js),
@@ -909,7 +910,14 @@ class Bubble:
         """
         if not self._sched:
             return
-        self.place_stacked(feature_id)
+        # A size animation is moving this window every ~12ms from its own
+        # thread. Re-placing it from here mid-flight reads a width the
+        # animation is halfway through changing and slams the window to a
+        # position computed for a size it no longer has — the bubble visibly
+        # jumps. The animation ends by placing itself, so skipping the tick
+        # loses nothing.
+        if not self._animating:
+            self.place_stacked(feature_id)
         self._sched.after(every_ms, lambda: self.keep_stacked(feature_id, every_ms))
 
     # ── growing and shrinking ──
@@ -950,11 +958,12 @@ class Bubble:
         bottom = self.y + self._px(self.h)
         centre = self.x + self._px(self.w) // 2
         began = time.monotonic()
+        self._animating = True
 
         def run():
             while True:
                 if gen != self._size_gen:
-                    return                   # a newer animation took over
+                    return                   # a newer animation took over (it owns the flag)
                 t = min(1.0, (time.monotonic() - began) * 1000 / ms)
                 # ease-out: quick off the mark, settling into the final size
                 e = 1 - (1 - t) ** 3
@@ -968,6 +977,7 @@ class Bubble:
                     break
                 time.sleep(0.012)
             self._apply_shape()
+            self._animating = False
             if on_done:
                 on_done()
 
@@ -979,6 +989,7 @@ class Bubble:
     def _animate_in_page(self, target: tuple[int, int], ms: int, gen: int,
                          anchor_left: bool, on_done):
         """The macOS path: CSS moves the bubble, the window just contains it."""
+        self._animating = True
         hold = (max(self.content_w, target[0]), max(self.content_h, target[1]))
         self.resize_content(*hold)
         (self._anchor_bottom_left if anchor_left
@@ -988,6 +999,7 @@ class Bubble:
         def settle():
             if gen != self._size_gen:
                 return
+            self._animating = False
             self._set_content_size(*target)
             self.resize_content(*target)
             (self._anchor_bottom_left if anchor_left

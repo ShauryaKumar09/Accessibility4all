@@ -23,6 +23,41 @@ def _ensure_tesseract():
         _configured = True
 
 
+def _virtual_desktop() -> tuple[int, int, int, int]:
+    """The bounding box of ALL monitors, in logical pixels (Windows)."""
+    import ctypes
+
+    u = ctypes.windll.user32
+    # SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77, CX=78, CY=79
+    return (u.GetSystemMetrics(76), u.GetSystemMetrics(77),
+            u.GetSystemMetrics(78), u.GetSystemMetrics(79))
+
+
+def grab(region: tuple[int, int, int, int] | None = None) -> Image.Image:
+    """Screenshot that works on a SECOND monitor, unlike `pyautogui`.
+
+    `pyautogui.screenshot()` only ever sees the primary display: ask it for a
+    region on a monitor to the right (or above/left of the origin) and it
+    returns a pure-black image, which OCRs to zero elements — every click then
+    fails with "model returned index -1, valid range 0..-1". `ImageGrab` with
+    `all_screens=True` spans the whole virtual desktop, so it is the only
+    capture path here. Coordinates stay in virtual-desktop space, which is the
+    same space `pyautogui.click()` moves in, so callers need no extra offset.
+    """
+    if plat.IS_WINDOWS:
+        from PIL import ImageGrab
+
+        if region:
+            left, top, width, height = region
+            box = (left, top, left + max(1, width), top + max(1, height))
+        else:
+            vx, vy, vw, vh = _virtual_desktop()
+            box = (vx, vy, vx + vw, vy + vh)
+        return ImageGrab.grab(bbox=box, all_screens=True)
+    return (pyautogui.screenshot(region=region) if region
+            else pyautogui.screenshot())
+
+
 def capture_screen_elements(
     log_fn: LogFn | None = None,
     region: tuple[int, int, int, int] | None = None,
@@ -38,12 +73,20 @@ def capture_screen_elements(
     if region:
         left, top, width, height = region
         width, height = max(1, width), max(1, height)
-        screenshot = pyautogui.screenshot(region=(left, top, width, height))
+        screenshot = grab((left, top, width, height))
         offset_x, offset_y = left, top
         _log("SCREENSHOT", f"region {width}x{height} at ({left}, {top})")
     else:
-        screenshot = pyautogui.screenshot()
-    logical_w, logical_h = pyautogui.size()
+        screenshot = grab()
+        if plat.IS_WINDOWS:
+            # A full-screen grab spans every monitor, so it is measured against
+            # the virtual desktop, not the primary display, and its top-left
+            # can be negative when a monitor sits left of / above the origin.
+            offset_x, offset_y, _, _ = _virtual_desktop()
+    if plat.IS_WINDOWS and not region:
+        _, _, logical_w, logical_h = _virtual_desktop()
+    else:
+        logical_w, logical_h = pyautogui.size()
     phys_w, phys_h = screenshot.size
     if region:
         _, _, region_w, region_h = region
@@ -245,7 +288,7 @@ def capture_chrome_screenshot() -> Image.Image:
     bounds = plat.get_chrome_window_bounds()
     if bounds:
         bounds = _below_chrome_ui(bounds)
-    shot = pyautogui.screenshot(region=bounds) if bounds else pyautogui.screenshot()
+    shot = grab(bounds) if bounds else grab()
     return shot
 
 
