@@ -155,7 +155,7 @@ async function renderFeaturePage(main, feat) {
     <p class="page-sub">${escapeHtml(feat.description)}</p>
     <div class="body-split">
       <div class="steps" id="steps-col"></div>
-      <div class="placeholder-panel">Preview coming soon</div>
+      <div class="preview-panel" id="preview-panel"><div class="preview-empty">Preview coming soon</div></div>
     </div>
     <div class="controls-grid" id="title-controls"></div>
     <div id="settings-panel-host"></div>
@@ -163,6 +163,7 @@ async function renderFeaturePage(main, feat) {
 
   await renderTitleControls(feat, settings, on);
   renderSteps(feat);
+  renderPreview(feat);
 
   const panelHost = document.getElementById("settings-panel-host");
   if (feat.settingsPanel) {
@@ -351,6 +352,72 @@ function openHotkeyModal(feat, shortcut, settings) {
     hint.textContent = `Set to ${res.label}`;
     setTimeout(() => { closeModal(); renderTitleControls(feat, settings, !!STATE.enabled[feat.id]); }, 700);
   });
+}
+
+
+/* ── preview panel (screenshots + screen recordings) ─────────────────── */
+// One cycler at a time: leaving the page must stop the old timer, or every
+// feature page ever visited keeps ticking in the background.
+let previewTimer = null;
+
+async function renderPreview(feat) {
+  if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
+  const host = document.getElementById("preview-panel");
+  if (!host) return;
+
+  let media;
+  try {
+    media = await api().get_preview_media(feat.id);
+  } catch (e) {
+    return;                        // leave the "coming soon" placeholder
+  }
+  const videos = media.videos || [];
+  const images = media.images || [];
+  const labels = media.labels || [];
+  if (!videos.length && !images.length) return;
+
+  // A recording shows the feature actually running, so it wins the panel.
+  if (videos.length) {
+    host.innerHTML = `
+      <video class="preview-media" src="${escapeHtml(videos[0])}"
+             autoplay loop muted playsinline></video>`;
+    return;
+  }
+
+  if (images.length === 1) {
+    host.innerHTML = `<img class="preview-media" src="${escapeHtml(images[0])}" alt="">`;
+    return;
+  }
+
+  // Several images: cycle them, a second each, with the name of what is on
+  // screen. Both frames stay in the DOM and cross-fade, so the panel never
+  // flashes empty between them.
+  host.innerHTML = `
+    <img class="preview-media preview-slide is-on" id="slide-a" alt="">
+    <img class="preview-media preview-slide" id="slide-b" alt="">
+    <div class="preview-caption" id="preview-caption"></div>`;
+  const a = document.getElementById("slide-a");
+  const b = document.getElementById("slide-b");
+  const cap = document.getElementById("preview-caption");
+  let i = 0, showingA = true;
+  a.src = images[0];
+  if (cap) cap.textContent = labels[0] || "";
+  // Preload, so a slide is never blank the first time round.
+  images.forEach(src => { const im = new Image(); im.src = src; });
+
+  previewTimer = setInterval(() => {
+    if (!document.getElementById("slide-a")) {   // navigated away
+      clearInterval(previewTimer); previewTimer = null; return;
+    }
+    i = (i + 1) % images.length;
+    const next = showingA ? b : a;
+    const curr = showingA ? a : b;
+    next.src = images[i];
+    next.classList.add("is-on");
+    curr.classList.remove("is-on");
+    showingA = !showingA;
+    if (cap) cap.textContent = labels[i] || "";
+  }, 1000);
 }
 
 /* ── utils ───────────────────────────────────────────────────────────── */

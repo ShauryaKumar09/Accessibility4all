@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import webview
 from dotenv import load_dotenv
@@ -51,8 +52,27 @@ load_dotenv()
 ROOT = Path(__file__).parent.resolve()
 FEATURES_DIR = ROOT / "features"
 UI_DIR = ROOT / "hub_ui"
+# Inside hub_ui/ on purpose: WebView2 confines a file:// page to its own
+# directory, so media anywhere else (even one level up via ../) fails to load
+# with MEDIA_ERR_SRC_NOT_SUPPORTED and a zero-width image.
+PREVIEW_DIR = UI_DIR / "preview_images"
 STATE_FILE = ROOT / "hub_state.json"     # toggles + text scale
 STDERR_KEEP_LINES = 25                   # tail kept per feature, to explain a crash
+
+# Which preview_images/ folder belongs to which feature. The folders are named
+# the way a person would name them ("cursor size", "tone and social cues
+# images"), so the mapping is explicit rather than derived from the id.
+PREVIEW_FOLDERS = {
+    "voice_control": "voice control",
+    "page_reader": "page reader",
+    "tone_reader": "tone and social cues images",
+    "colorblind_filter": "color_blind_pics",
+    "focus_mode": "focus mode",
+    "cursor_size": "cursor size",
+}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+VIDEO_SUFFIXES = {".mov", ".mp4", ".webm", ".m4v"}
+
 
 FEATURE_ORDER = ["voice_control", "page_reader", "tone_reader",
                  "colorblind_filter", "focus_mode", "cursor_size"]
@@ -387,6 +407,37 @@ class Api:
         return {"enabled": self.launch_at_startup,
                 "supported": autostart.is_supported()}
 
+    def get_preview_media(self, feature_id: str) -> dict:
+        """The screenshots / screen recordings that show this feature working.
+
+        Returned as file:// URLs the page loads directly — the hub is itself
+        served from a file:// URL, so no local server is needed. Images from a
+        folder holding several are meant to be cycled through; a single image
+        is just shown. Videos are handed over as-is: the recordings are H.264
+        in a QuickTime container, which WebView2 plays natively.
+        """
+        folder = PREVIEW_FOLDERS.get(feature_id)
+        if not folder:
+            return {"images": [], "videos": []}
+        base = PREVIEW_DIR / folder
+        if not base.is_dir():
+            return {"images": [], "videos": []}
+        images, videos = [], []
+        # rglob: some folders nest the media one level deeper.
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            suffix = path.suffix.lower()
+            if suffix in IMAGE_SUFFIXES:
+                images.append(path)
+            elif suffix in VIDEO_SUFFIXES:
+                videos.append(path)
+        return {
+            "images": [_page_url(p) for p in images],
+            "videos": [_page_url(p) for p in videos],
+            "labels": [_media_label(p) for p in images],
+        }
+
     def set_launch_at_startup(self, enabled: bool) -> dict:
         try:
             autostart.set_enabled(bool(enabled))
@@ -696,6 +747,40 @@ def _bring_to_front(window):
         window.on_top = False
     except Exception:
         pass
+
+
+
+def _page_url(path: Path) -> str:
+    """A URL for `index.html` to load, relative to hub_ui/.
+
+    Relative rather than absolute file://, because that is what stays inside
+    the directory WebView2 will serve from — and each segment is percent-
+    encoded, since every one of these folders has a space in its name.
+    """
+    rel = path.resolve().relative_to(UI_DIR.resolve())
+    return "/".join(quote(part) for part in rel.parts)
+
+
+def _media_label(path: Path) -> str:
+    """A readable caption from the file name: "image_grayscale_inverted" →
+    "Grayscale inverted".
+
+    Camera and screenshot names carry nothing worth showing ("IMG_6454",
+    "image", "min"), so those get no caption at all rather than a meaningless
+    one under the picture.
+    """
+    stem = path.stem
+    for prefix in ("image_", "image-"):
+        if stem.lower().startswith(prefix):
+            stem = stem[len(prefix):]
+            break
+    else:
+        # A bare camera/screenshot name describes nothing.
+        if (stem.lower() in {"image", "min", "max", "screenshot"}
+                or re.fullmatch(r"(?:IMG|DSC|PXL|Screenshot)[ _-]?[0-9 _-]+", stem, re.I)):
+            return ""
+    stem = stem.replace("_", " ").replace("-", " ").strip()
+    return stem[:1].upper() + stem[1:] if stem else ""
 
 
 def main():
