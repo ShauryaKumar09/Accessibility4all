@@ -15,3 +15,7 @@ features/focus_mode/elevate_payload.json
 features/focus_mode/elevate_status.json
 features/focus_mode/hosts_backup.txt
 .venv/
+
+# ad-hoc screenshots dropped at the repo root while working
+/image.png
+/image copy*.png
