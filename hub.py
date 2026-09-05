@@ -568,20 +568,30 @@ class Api:
                     return
                 was_admin = fm.is_admin()
                 fm.apply_block(domains)
-                settings["active"] = True
-                settings["end_time"] = time.time() + int(
+                pending_end_time = time.time() + int(
                     settings.get("duration_minutes", 25)) * 60
             else:
                 console.log_event("hub", "apply_start", feature="focus_mode",
                                   turning_on=False, domains=domains)
                 was_admin = fm.is_admin()
                 fm.remove_block()
-                settings["active"] = False
-                settings["end_time"] = 0.0
-            store.save("focus_mode", settings)
+                pending_end_time = 0.0
+            # Re-read settings and check the hosts file itself rather than
+            # assuming this call's request is what landed: fm.apply_block /
+            # remove_block can go through a UAC prompt or a scheduled task
+            # and block for a while, and if the hub were killed or crashed
+            # mid-toggle, `active` must reflect whichever state actually made
+            # it to disk — not whichever this call started out asking for.
+            # Writing it from the request unconditionally is what left
+            # settings.json saying "active": true with nothing blocked after
+            # an interrupted toggle-off.
+            settings = store.load("focus_mode")
             hosts_text = fm.HOSTS_PATH.read_text(encoding="utf-8", errors="ignore") \
                 if fm.HOSTS_PATH.exists() else ""
             marker_present = fm.MARK_BEGIN in hosts_text
+            settings["active"] = marker_present
+            settings["end_time"] = pending_end_time if marker_present else 0.0
+            store.save("focus_mode", settings)
             console.log_event("hub", "apply_result", feature="focus_mode",
                               ok=(marker_present == turning_on),
                               turning_on=turning_on, domains=domains,
@@ -672,6 +682,44 @@ class Api:
                 self._start(feat)
         self._enabled &= known
         save_state(self._enabled, self.text_scale, self.launch_at_startup)
+        self._reconcile_focus_mode()
+
+    def _reconcile_focus_mode(self):
+        """Fix settings.json if a previous hub run died mid-toggle.
+
+        Focus Mode's "on" state lives in settings.json ("active"), not in
+        hub_state's enabled set, so a hub crash between the hosts-file write
+        and the settings save leaves "active" pointing at whichever state
+        was requested rather than whichever one actually landed — the sidebar
+        switch then shows on/off while the hosts file (or the earlier
+        settings write) disagrees with it. The hosts file is the one thing
+        that cannot lie about whether sites are actually blocked, so on
+        startup it wins: settings["active"] is corrected to match it, with
+        no elevation prompt either way, since fixing a label needs none.
+        """
+        try:
+            fm = _load_feature_module("focus_mode")
+            settings = store.load("focus_mode")
+            hosts_text = fm.HOSTS_PATH.read_text(encoding="utf-8", errors="ignore") \
+                if fm.HOSTS_PATH.exists() else ""
+            marker_present = fm.MARK_BEGIN in hosts_text
+            if bool(settings.get("active")) != marker_present:
+                safe_print(f"[hub] focus_mode settings said active={settings.get('active')} "
+                          f"but the hosts file says {marker_present} — correcting "
+                          f"(a previous session likely didn't finish a toggle)", flush=True)
+                settings["active"] = marker_present
+                if not marker_present:
+                    settings["end_time"] = 0.0
+                elif float(settings.get("end_time", 0.0)) <= time.time():
+                    # The block is genuinely still up but has no (or an
+                    # already-past) end time — give it a fresh one instead of
+                    # ending the session the instant _tick() next runs, which
+                    # would remove a block that was actually still wanted.
+                    settings["end_time"] = time.time() + int(
+                        settings.get("duration_minutes", 25)) * 60
+                store.save("focus_mode", settings)
+        except Exception as e:
+            safe_print(f"[hub] focus_mode reconciliation failed: {e}", flush=True)
 
     def poll(self) -> dict:
         """Called by JS on a timer — detects a crashed subprocess and reflects it."""
