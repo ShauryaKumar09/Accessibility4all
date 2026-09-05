@@ -325,6 +325,9 @@ def _dpi_scale() -> float:
         return 1.0
 
 
+_REAL_WORK_AREA: tuple[int, int, int, int] | None = None
+
+
 def screen_size() -> tuple[int, int]:
     """The main display in logical points — what window coordinates are in.
 
@@ -334,6 +337,25 @@ def screen_size() -> tuple[int, int]:
     at 125% a bottom-right card landed a third of the way off the screen
     with its text cut off. Divide the physical size back down to points.
     """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            hdc = user32.GetDC(0)
+            try:
+                # True pixels, the space windows are actually placed in — the
+                # virtualised GetSystemMetrics answer is 1536x864 on a
+                # 1920x1080 display at 125%, which put every edge-anchored
+                # bubble short of the edge. See `_real_desktop`.
+                phys = (ctypes.windll.gdi32.GetDeviceCaps(hdc, 118),
+                        ctypes.windll.gdi32.GetDeviceCaps(hdc, 117))
+            finally:
+                user32.ReleaseDC(0, hdc)
+            if all(phys):
+                return phys
+        except Exception:
+            pass
     try:
         s = webview.screens[0]
         scale = _dpi_scale()
@@ -342,18 +364,74 @@ def screen_size() -> tuple[int, int]:
         return 1440, 900
 
 
+def _real_desktop() -> tuple[int, int, int, int] | None:
+    """The primary display's work area in TRUE pixels, DPI scaling included.
+
+    Everything Windows tells a DPI-unaware process is virtualised: on a
+    1920x1080 display at 125% both `GetSystemMetrics` and `SPI_GETWORKAREA`
+    answer 1536x864, while `SetWindowPos` places windows in the real 1920x1080
+    space. Placing a bubble from the virtualised number therefore leaves it
+    short of the edge it was anchored to — Focus Mode's collapsed circle sat
+    365px above the taskbar, floating in the middle of the screen, instead of
+    10px above it in the bottom-left corner.
+
+    Asking a *different* process for the metrics is what gets the real ones
+    without making this process DPI-aware, which would change how every window
+    is sized (see `_fit_to_scale`). Returns (left, top, right, bottom) or None.
+    """
+    if sys.platform != "win32":
+        return None
+    global _REAL_WORK_AREA
+    if _REAL_WORK_AREA is not None:
+        return _REAL_WORK_AREA
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        # PROCESS_PER_MONITOR_DPI_AWARE in a throwaway query is not possible
+        # once a process has a DPI context, so read the monitor directly:
+        # MonitorFromWindow + GetMonitorInfo report virtualised values too,
+        # but the physical mode of the display does not lie.
+        user32 = ctypes.windll.user32
+        hdc = user32.GetDC(0)
+        try:
+            # DESKTOPHORZRES/VERTRES are the true pixel dimensions even when
+            # the process is DPI-unaware — that is exactly what they are for.
+            DESKTOPVERTRES, DESKTOPHORZRES = 117, 118
+            phys_w = ctypes.windll.gdi32.GetDeviceCaps(hdc, DESKTOPHORZRES)
+            phys_h = ctypes.windll.gdi32.GetDeviceCaps(hdc, DESKTOPVERTRES)
+        finally:
+            user32.ReleaseDC(0, hdc)
+        if not phys_w or not phys_h:
+            return None
+        virt_w = user32.GetSystemMetrics(0)
+        virt_h = user32.GetSystemMetrics(1)
+        if not virt_w or not virt_h:
+            return None
+        kx, ky = phys_w / virt_w, phys_h / virt_h
+        rect = wintypes.RECT()
+        if not user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return None
+        _REAL_WORK_AREA = (int(rect.left * kx), int(rect.top * ky),
+                           int(rect.right * kx), int(rect.bottom * ky))
+        return _REAL_WORK_AREA
+    except Exception:
+        return None
+
+
 def work_area() -> tuple[int, int]:
     """The usable bottom-right corner of the primary display, in real pixels.
 
     Bubbles sit just above the taskbar, and the taskbar is not part of the work
     area — so this is what "near the bottom of the screen" is measured from.
 
-    Windows answers this one in the same virtualised units it gives every
-    DPI-unaware process (1536x864 on a 1920x1080 display at 125%), while
-    windows are placed in real pixels, so the reserved strip is scaled up
-    before it is subtracted. Falls back to the whole screen, which only costs
-    a bubble a taskbar's worth of margin.
+    The numbers must be in the same space `SetWindowPos` places windows in,
+    which on Windows is real pixels rather than the virtualised ones a
+    DPI-unaware process is told about — see `_real_desktop`.
     """
+    real = _real_desktop()
+    if real is not None:
+        return real[2], real[3]
     sw, sh = screen_size()
     if sys.platform == "darwin":
         try:
